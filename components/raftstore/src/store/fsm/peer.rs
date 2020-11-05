@@ -33,12 +33,14 @@ use raft::{self, SnapshotStatus, INVALID_INDEX, NO_LIMIT};
 use raft::{Ready, StateRole};
 use tikv_util::mpsc::{self, LooseBoundedSender, Receiver};
 use tikv_util::time::duration_to_sec;
+use tikv_util::trace::*;
 use tikv_util::worker::{Scheduler, Stopped};
 use tikv_util::{escape, is_zero_duration, Either};
 
 use crate::coprocessor::RegionChangeEvent;
 use crate::store::cmd_resp::{bind_term, new_error};
 use crate::store::fsm::store::{PollContext, StoreMeta};
+use crate::store::fsm::tracer::RaftTracer;
 use crate::store::fsm::{
     apply, ApplyMetrics, ApplyTask, ApplyTaskRes, CatchUpLogs, ChangeCmd, ChangePeer, ExecResult,
 };
@@ -357,6 +359,7 @@ where
             }
             metric.batch += self.callbacks.len() - 1;
             let mut cbs = std::mem::take(&mut self.callbacks);
+
             let proposed_cbs: Vec<ExtCallback> = cbs
                 .iter_mut()
                 .filter_map(|cb| {
@@ -376,6 +379,7 @@ where
                     }
                 }))
             };
+
             let committed_cbs: Vec<_> = cbs
                 .iter_mut()
                 .filter_map(|cb| {
@@ -395,6 +399,20 @@ where
                     }
                 }))
             };
+
+            let trace_scope = Scope::from_parents(
+                "BatchRaftCmdRequest",
+                cbs.iter().filter_map(|(cb, _)| match cb {
+                    Callback::Read { trace_scope, .. } if !trace_scope.is_empty() => {
+                        Some(trace_scope)
+                    }
+                    Callback::Write { trace_scope, .. } if !trace_scope.is_empty() => {
+                        Some(trace_scope)
+                    }
+                    _ => None,
+                }),
+            );
+
             let cb = Callback::write_ext(
                 Box::new(move |resp| {
                     let mut last_index = 0;
@@ -414,7 +432,8 @@ where
                 }),
                 proposed_cb,
                 committed_cb,
-            );
+            )
+            .with_trace_scope(trace_scope);
             return Some(RaftCommand::new(req, cb));
         }
         None
@@ -487,6 +506,10 @@ where
                     }
                 }
                 PeerMsg::RaftCommand(cmd) => {
+                    cmd.callback.access_trace_scope(|scope| {
+                        RaftTracer::add_scope(Scope::from_parent("Raft Poll", scope))
+                    });
+
                     self.ctx
                         .raft_metrics
                         .propose
@@ -769,7 +792,7 @@ where
         let apply_router = self.ctx.apply_router.clone();
         self.propose_raft_command(
             msg,
-            Callback::Read(Box::new(move |resp| {
+            Callback::read(Box::new(move |resp| {
                 // Return the error
                 if resp.response.get_header().has_error() {
                     cb.invoke_read(resp);
@@ -3056,6 +3079,7 @@ where
         }
     }
 
+    #[trace("PeerFsmDelegate::on_ready_result")]
     fn on_ready_result(
         &mut self,
         exec_results: &mut VecDeque<ExecResult<EK::Snapshot>>,
@@ -3258,6 +3282,7 @@ where
         }
     }
 
+    #[trace("PeerFsmDelegate::propose_raft_command")]
     fn propose_raft_command(&mut self, mut msg: RaftCmdRequest, cb: Callback<EK::Snapshot>) {
         match self.pre_propose_raft_command(&msg) {
             Ok(Some(resp)) => {

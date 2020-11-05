@@ -28,6 +28,7 @@ use collections::HashMap;
 use engine_traits::{KvEngine, RaftEngine};
 use tikv_util::time::monotonic_raw_now;
 use tikv_util::time::{Instant, ThreadReadId};
+use tikv_util::trace::*;
 
 use super::metrics::*;
 use crate::store::fsm::store::StoreMeta;
@@ -499,6 +500,7 @@ where
         }
     }
 
+    #[trace("LocalReader::propose_raft_command")]
     pub fn propose_raft_command(
         &mut self,
         mut read_id: Option<ThreadReadId>,
@@ -792,7 +794,7 @@ mod tests {
         reader.propose_raft_command(
             None,
             cmd.clone(),
-            Callback::Read(Box::new(|resp| {
+            Callback::read(Box::new(|resp| {
                 panic!("unexpected invoke, {:?}", resp);
             })),
         );
@@ -891,7 +893,7 @@ mod tests {
             meta.readers.get_mut(&1).unwrap().update(pg);
         }
         let task =
-            RaftCommand::<KvTestSnapshot>::new(cmd.clone(), Callback::Read(Box::new(move |_| {})));
+            RaftCommand::<KvTestSnapshot>::new(cmd.clone(), Callback::read(Box::new(move |_| {})));
         must_not_redirect(&mut reader, &rx, task);
         assert_eq!(reader.metrics.rejected_by_cache_miss, 3);
 
@@ -899,7 +901,7 @@ mod tests {
         let region = region1.clone();
         let task = RaftCommand::<KvTestSnapshot>::new(
             cmd.clone(),
-            Callback::Read(Box::new(move |resp: ReadResponse<KvTestSnapshot>| {
+            Callback::read(Box::new(move |resp: ReadResponse<KvTestSnapshot>| {
                 let snap = resp.snapshot.unwrap();
                 assert_eq!(snap.get_region(), &region);
             })),
@@ -923,7 +925,7 @@ mod tests {
         reader.propose_raft_command(
             None,
             cmd_store_id,
-            Callback::Read(Box::new(move |resp: ReadResponse<KvTestSnapshot>| {
+            Callback::read(Box::new(move |resp: ReadResponse<KvTestSnapshot>| {
                 let err = resp.response.get_header().get_error();
                 assert!(err.has_store_not_match());
                 assert!(resp.snapshot.is_none());
@@ -941,7 +943,7 @@ mod tests {
         reader.propose_raft_command(
             None,
             cmd_peer_id,
-            Callback::Read(Box::new(move |resp: ReadResponse<KvTestSnapshot>| {
+            Callback::read(Box::new(move |resp: ReadResponse<KvTestSnapshot>| {
                 assert!(
                     resp.response.get_header().has_error(),
                     "{:?}",
@@ -963,7 +965,7 @@ mod tests {
         reader.propose_raft_command(
             None,
             cmd_term,
-            Callback::Read(Box::new(move |resp: ReadResponse<KvTestSnapshot>| {
+            Callback::read(Box::new(move |resp: ReadResponse<KvTestSnapshot>| {
                 let err = resp.response.get_header().get_error();
                 assert!(err.has_stale_command(), "{:?}", resp);
                 assert!(resp.snapshot.is_none());
@@ -994,7 +996,7 @@ mod tests {
         reader.propose_raft_command(
             None,
             cmd.clone(),
-            Callback::Read(Box::new(move |resp: ReadResponse<KvTestSnapshot>| {
+            Callback::read(Box::new(move |resp: ReadResponse<KvTestSnapshot>| {
                 let err = resp.response.get_header().get_error();
                 assert!(err.has_server_is_busy(), "{:?}", resp);
                 assert!(resp.snapshot.is_none());
@@ -1022,7 +1024,7 @@ mod tests {
         reader.propose_raft_command(
             None,
             cmd9.clone(),
-            Callback::Read(Box::new(|resp| {
+            Callback::read(Box::new(|resp| {
                 panic!("unexpected invoke, {:?}", resp);
             })),
         );
@@ -1046,7 +1048,7 @@ mod tests {
             let mut meta = store_meta.lock().unwrap();
             meta.readers.get_mut(&1).unwrap().update(pg);
         }
-        let task = RaftCommand::<KvTestSnapshot>::new(cmd, Callback::Read(Box::new(move |_| {})));
+        let task = RaftCommand::<KvTestSnapshot>::new(cmd, Callback::read(Box::new(move |_| {})));
         must_not_redirect(&mut reader, &rx, task);
         assert_eq!(reader.metrics.rejected_by_cache_miss, 5);
     }
