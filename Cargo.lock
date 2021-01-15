@@ -1230,10 +1230,13 @@ dependencies = [
  "protobuf",
  "quick-error",
  "raft",
+ "serde",
+ "serde_derive",
  "slog",
  "slog-global",
  "tikv_alloc",
  "tikv_util",
+ "toml",
  "txn_types",
 ]
 
@@ -2012,7 +2015,7 @@ dependencies = [
 [[package]]
 name = "kvproto"
 version = "0.0.2"
-source = "git+https://github.com/pingcap/kvproto.git#1df45810a26df001620f9508b06588640847965e"
+source = "git+https://github.com/zhongzc/kvproto.git?rev=06a68a29feca0f10ee83b21ea8082abb78d1f87b#06a68a29feca0f10ee83b21ea8082abb78d1f87b"
 dependencies = [
  "futures 0.3.7",
  "grpcio",
@@ -2302,20 +2305,28 @@ dependencies = [
 [[package]]
 name = "minitrace"
 version = "0.1.0"
-source = "git+https://github.com/pingcap-incubator/minitrace-rust.git#de69110975b42d898f4ba2d25fb4d334de80edd3"
+source = "git+https://github.com/tikv/minitrace-rust.git?rev=a6842f254954223755b4894adf7903a94fe0fd25#a6842f254954223755b4894adf7903a94fe0fd25"
 dependencies = [
  "crossbeam",
- "futures 0.1.29",
- "futures 0.3.7",
- "lazy_static",
- "minitrace-attribute",
+ "minstant",
  "pin-project 0.4.8",
+ "slab",
+ "smallvec",
 ]
 
 [[package]]
-name = "minitrace-attribute"
+name = "minitrace-jaeger"
 version = "0.1.0"
-source = "git+https://github.com/pingcap-incubator/minitrace-rust.git#de69110975b42d898f4ba2d25fb4d334de80edd3"
+source = "git+https://github.com/tikv/minitrace-rust.git?rev=a6842f254954223755b4894adf7903a94fe0fd25#a6842f254954223755b4894adf7903a94fe0fd25"
+dependencies = [
+ "minitrace",
+ "thrift_codec",
+]
+
+[[package]]
+name = "minitrace-macro"
+version = "0.1.0"
+source = "git+https://github.com/tikv/minitrace-rust.git?rev=a6842f254954223755b4894adf7903a94fe0fd25#a6842f254954223755b4894adf7903a94fe0fd25"
 dependencies = [
  "proc-macro-error",
  "quote 1.0.3",
@@ -2329,6 +2340,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "791daaae1ed6889560f8c4359194f56648355540573244a5448a83ba1ecc7435"
 dependencies = [
  "adler32",
+]
+
+[[package]]
+name = "minstant"
+version = "0.0.1"
+source = "git+https://github.com/zhongzc/minstant.git#6d9a8bb4c0b3c79051b6a9fad548d60f00f72713"
+dependencies = [
+ "lazy_static",
+ "libc",
+ "wasi",
 ]
 
 [[package]]
@@ -4695,6 +4716,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "thrift_codec"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fb61fb3d0a0af14949f3a6949b2639112e13226647112824f4d081533f9b1a8"
+dependencies = [
+ "byteorder",
+ "trackable",
+]
+
+[[package]]
 name = "tidb_query_aggr"
 version = "0.0.1"
 dependencies = [
@@ -4884,7 +4915,6 @@ dependencies = [
  "log_wrappers",
  "match_template",
  "mime",
- "minitrace",
  "more-asserts",
  "murmur3",
  "nom 5.1.0",
@@ -5015,6 +5045,8 @@ dependencies = [
  "log",
  "log_wrappers",
  "minitrace",
+ "minitrace-jaeger",
+ "minitrace-macro",
  "num_cpus",
  "openssl",
  "panic_hook",
@@ -5229,6 +5261,25 @@ name = "tower-service"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e987b6bf443f4b5b3b6f38704195592cca41c5bb7aedd3c3693c7081f8289860"
+
+[[package]]
+name = "trackable"
+version = "0.2.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11475c3c53b075360eac9794965822cb053996046545f91cf61d90e00b72efa5"
+dependencies = [
+ "trackable_derive",
+]
+
+[[package]]
+name = "trackable_derive"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edcf0b9b2caa5f4804ef77aeee1b929629853d806117c48258f402b69737e65c"
+dependencies = [
+ "quote 1.0.3",
+ "syn 1.0.48",
+]
 
 [[package]]
 name = "try-lock"

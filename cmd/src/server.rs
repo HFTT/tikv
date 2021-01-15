@@ -80,6 +80,10 @@ use tikv_util::{
 use tokio::runtime::Builder;
 
 use crate::{setup::*, signal_handler};
+use tikv::server::trace::{
+    JaegerReportRunner, JaegerSubscriber, Reporter as TraceReporter,
+    ReporterBuilder as TraceReporterBuilder,
+};
 use tikv_util::worker::LazyWorker;
 
 /// Run a TiKV server. Returns when the server is shutdown by the user, in which
@@ -578,6 +582,29 @@ impl<ER: RaftEngine> TiKVServer<ER> {
 
         let server_config = Arc::new(self.config.server.clone());
 
+        // Create trace reporter
+        let trace_reporter: Arc<TraceReporter> = {
+            let mut builder = TraceReporterBuilder::new();
+
+            let addr = &self.config.trace.jaeger_thrift_compact_agent;
+            if !addr.is_empty() {
+                let agent: SocketAddr = addr
+                    .parse()
+                    .unwrap_or_else(|_| fatal!("failed to parse into a socket address: {}", addr));
+                let jaeger = JaegerSubscriber::new(
+                    self.background_worker
+                        .start("jaeger-reporter", JaegerReportRunner),
+                    agent,
+                );
+                builder.register(jaeger);
+            }
+
+            builder.duration_threshold(self.config.trace.duration_threshold.into());
+            builder.spans_max_length(self.config.trace.max_spans_length);
+
+            Arc::new(builder.build())
+        };
+
         // Create server
         let server = Server::new(
             &server_config,
@@ -587,7 +614,7 @@ impl<ER: RaftEngine> TiKVServer<ER> {
                 &server_config,
                 cop_read_pool_handle,
                 self.concurrency_manager.clone(),
-                self.config.coprocessor.perf_level,
+                engine_rocks::raw_util::to_raw_perf_level(self.config.coprocessor.perf_level),
             ),
             self.router.clone(),
             self.resolver.clone(),
@@ -596,6 +623,7 @@ impl<ER: RaftEngine> TiKVServer<ER> {
             self.env.clone(),
             unified_read_pool,
             debug_thread_pool,
+            trace_reporter,
         )
         .unwrap_or_else(|e| fatal!("failed to create server: {}", e));
 

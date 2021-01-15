@@ -18,7 +18,8 @@ use std::{cmp, usize};
 use batch_system::{BasicMailbox, BatchRouter, BatchSystem, Fsm, HandlerBuilder, PollHandler};
 use collections::{HashMap, HashMapEntry, HashSet};
 use crossbeam::channel::{TryRecvError, TrySendError};
-use engine_rocks::{PerfContext, PerfLevel};
+use engine_traits::PerfContext;
+use engine_traits::PerfContextKind;
 use engine_traits::{
     DeleteStrategy, KvEngine, RaftEngine, Range as EngineRange, Snapshot, WriteBatch,
 };
@@ -41,6 +42,7 @@ use sst_importer::SSTImporter;
 use tikv_util::config::{Tracker, VersionTrack};
 use tikv_util::mpsc::{loose_bounded, LooseBoundedSender, Receiver};
 use tikv_util::time::{duration_to_sec, Instant};
+use tikv_util::trace::*;
 use tikv_util::worker::Scheduler;
 use tikv_util::{Either, MustConsumeVec};
 use time::Timespec;
@@ -56,12 +58,13 @@ use crate::store::peer_storage::{
 };
 use crate::store::util::{
     check_region_epoch, compare_region_epoch, is_learner, ChangePeerI, ConfChangeKind,
-    KeysInfoFormatter, PerfContextStatistics, ADMIN_CMD_EPOCH_MAP,
+    KeysInfoFormatter, ADMIN_CMD_EPOCH_MAP,
 };
 use crate::store::{cmd_resp, util, Config, RegionSnapshot, RegionTask};
-use crate::{observe_perf_context_type, report_perf_context, Error, Result};
+use crate::{Error, Result};
 
 use super::metrics::*;
+use crate::store::fsm::tracer::ApplyTracer;
 
 const DEFAULT_APPLY_WB_SIZE: usize = 4 * 1024;
 const APPLY_WB_SHRINK_SIZE: usize = 1024 * 1024;
@@ -300,10 +303,18 @@ where
         ApplyCallback { region, cbs }
     }
 
+    #[trace("ApplyCallback::invoke_all")]
     fn invoke_all(self, host: &CoprocessorHost<EK>) {
         for (cb, mut cmd) in self.cbs {
             host.post_apply(&self.region, &mut cmd);
             if let Some(cb) = cb {
+                cb.access_trace_scope(|scope| {
+                    ApplyTracer::partial_submit(|s| {
+                        for spans in s {
+                            scope.extend_raw_spans(spans.clone())
+                        }
+                    })
+                });
                 cb.invoke_with_response(cmd.response)
             };
         }
@@ -349,7 +360,7 @@ where
     // Whether to use the delete range API instead of deleting one by one.
     use_delete_range: bool,
 
-    perf_context_statistics: PerfContextStatistics,
+    perf_context: EK::PerfContext,
 
     yield_duration: Duration,
 
@@ -387,7 +398,7 @@ where
             host,
             importer,
             region_scheduler,
-            engine,
+            engine: engine.clone(),
             router,
             notifier,
             kv_wb,
@@ -400,7 +411,7 @@ where
             sync_log_hint: false,
             exec_ctx: None,
             use_delete_range: cfg.use_delete_range,
-            perf_context_statistics: PerfContextStatistics::new(cfg.perf_level),
+            perf_context: engine.get_perf_context(cfg.perf_level, PerfContextKind::RaftstoreApply),
             yield_duration: cfg.apply_yield_duration.0,
             store_id,
             pending_create_peers,
@@ -453,6 +464,7 @@ where
 
     /// Writes all the changes into RocksDB.
     /// If it returns true, all pending writes are persisted in engines.
+    #[trace("ApplyContext::write_to_db")]
     pub fn write_to_db(&mut self) -> bool {
         let need_sync = self.sync_log_hint;
         if !self.kv_wb_mut().is_empty() {
@@ -461,10 +473,7 @@ where
             self.kv_wb().write_opt(&write_opts).unwrap_or_else(|e| {
                 panic!("failed to write to engine: {:?}", e);
             });
-            report_perf_context!(
-                self.perf_context_statistics,
-                APPLY_PERF_CONTEXT_TIME_HISTOGRAM_STATIC
-            );
+            self.perf_context.report_metrics();
             self.sync_log_hint = false;
             let data_size = self.kv_wb().data_size();
             if data_size > APPLY_WB_SHRINK_SIZE {
@@ -481,6 +490,7 @@ where
         // Call it before invoking callback for preventing Commit is executed before Prewrite is observed.
         self.host.on_flush_apply(self.engine.clone());
 
+        ApplyTracer::truncate();
         for cbs in self.cbs.drain(..) {
             cbs.invoke_all(&self.host);
         }
@@ -526,6 +536,7 @@ where
 
     /// Flush all pending writes to engines.
     /// If it returns true, all pending writes are persisted in engines.
+    #[trace("ApplyContext::flush")]
     pub fn flush(&mut self) -> bool {
         // TODO: this check is too hacky, need to be more verbose and less buggy.
         let t = match self.timer.take() {
@@ -904,6 +915,7 @@ where
         });
     }
 
+    #[trace("ApplyDelegate::handle_raft_entry_normal")]
     fn handle_raft_entry_normal<W: WriteBatch<EK>>(
         &mut self,
         apply_ctx: &mut ApplyContext<EK, W>,
@@ -954,6 +966,7 @@ where
         ApplyResult::None
     }
 
+    #[trace("ApplyDelegate::handle_raft_entry_conf_change")]
     fn handle_raft_entry_conf_change<W: WriteBatch<EK>>(
         &mut self,
         apply_ctx: &mut ApplyContext<EK, W>,
@@ -1031,6 +1044,7 @@ where
         None
     }
 
+    #[trace("ApplyDelegate::process_raft_cmd")]
     fn process_raft_cmd<W: WriteBatch<EK>>(
         &mut self,
         apply_ctx: &mut ApplyContext<EK, W>,
@@ -3006,6 +3020,7 @@ where
     }
 
     /// Handles apply tasks, and uses the apply delegate to handle the committed entries.
+    #[trace("ApplyFsm::handle_apply")]
     fn handle_apply<W: WriteBatch<EK>>(
         &mut self,
         apply_ctx: &mut ApplyContext<EK, W>,
@@ -3447,7 +3462,8 @@ where
                 _ => {}
             }
         }
-        self.apply_ctx.perf_context_statistics.start();
+        self.apply_ctx.perf_context.start_observe();
+        ApplyTracer::begin();
     }
 
     /// There is no control fsm in apply poller.
@@ -3519,6 +3535,7 @@ where
                 fsm.delegate.last_sync_apply_index = fsm.delegate.apply_state.get_applied_index();
             }
         }
+        ApplyTracer::end();
     }
 }
 
@@ -4678,7 +4695,7 @@ mod tests {
                     region_id: 1,
                     enabled: enabled.clone(),
                 },
-                cb: Callback::Read(Box::new(|resp: ReadResponse<KvTestSnapshot>| {
+                cb: Callback::read(Box::new(|resp: ReadResponse<KvTestSnapshot>| {
                     assert!(!resp.response.get_header().has_error());
                     assert!(resp.snapshot.is_some());
                     let snap = resp.snapshot.unwrap();
@@ -4748,7 +4765,7 @@ mod tests {
                     region_id: 2,
                     enabled,
                 },
-                cb: Callback::Read(Box::new(|resp: ReadResponse<_>| {
+                cb: Callback::read(Box::new(|resp: ReadResponse<_>| {
                     assert!(resp
                         .response
                         .get_header()
@@ -4923,7 +4940,7 @@ mod tests {
                     region_id: 1,
                     enabled: enabled.clone(),
                 },
-                cb: Callback::Read(Box::new(|resp: ReadResponse<_>| {
+                cb: Callback::read(Box::new(|resp: ReadResponse<_>| {
                     assert!(!resp.response.get_header().has_error(), "{:?}", resp);
                     assert!(resp.snapshot.is_some());
                 })),
@@ -5082,7 +5099,7 @@ mod tests {
                     region_id: 1,
                     enabled: Arc::new(AtomicBool::new(true)),
                 },
-                cb: Callback::Read(Box::new(move |resp: ReadResponse<_>| {
+                cb: Callback::read(Box::new(move |resp: ReadResponse<_>| {
                     assert!(
                         resp.response.get_header().get_error().has_epoch_not_match(),
                         "{:?}",

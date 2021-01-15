@@ -21,6 +21,7 @@ use crate::store::metrics::RaftEventDurationType;
 use crate::store::util::KeysInfoFormatter;
 use crate::store::SnapKey;
 use tikv_util::escape;
+use tikv_util::trace::*;
 
 use super::{AbstractPeer, RegionSnapshot};
 
@@ -65,7 +66,11 @@ pub enum Callback<S: Snapshot> {
     /// No callback.
     None,
     /// Read callback.
-    Read(ReadCallback<S>),
+    Read {
+        cb: ReadCallback<S>,
+
+        trace_scope: Scope,
+    },
     /// Write callback.
     Write {
         cb: WriteCallback,
@@ -76,6 +81,8 @@ pub enum Callback<S: Snapshot> {
         /// `committed_cb` is called after a request is committed and before it's being applied, and
         /// it's guaranteed that the request will be successfully applied soon.
         committed_cb: Option<ExtCallback>,
+
+        trace_scope: Scope,
     },
 }
 
@@ -83,6 +90,13 @@ impl<S> Callback<S>
 where
     S: Snapshot,
 {
+    pub fn read(cb: ReadCallback<S>) -> Self {
+        Callback::Read {
+            cb,
+            trace_scope: Scope::empty(),
+        }
+    }
+
     pub fn write(cb: WriteCallback) -> Self {
         Self::write_ext(cb, None, None)
     }
@@ -96,21 +110,28 @@ where
             cb,
             proposed_cb,
             committed_cb,
+            trace_scope: Scope::empty(),
         }
     }
 
     pub fn invoke_with_response(self, resp: RaftCmdResponse) {
         match self {
             Callback::None => (),
-            Callback::Read(read) => {
+            Callback::Read { cb, trace_scope } => {
+                let _g = trace_scope.try_enter();
+
                 let resp = ReadResponse {
                     response: resp,
                     snapshot: None,
                     txn_extra_op: TxnExtraOp::Noop,
                 };
-                read(resp);
+                cb(resp);
             }
-            Callback::Write { cb, .. } => {
+            Callback::Write {
+                cb, trace_scope, ..
+            } => {
+                let _g = trace_scope.try_enter();
+
                 let resp = WriteResponse { response: resp };
                 cb(resp);
             }
@@ -135,13 +156,38 @@ where
 
     pub fn invoke_read(self, args: ReadResponse<S>) {
         match self {
-            Callback::Read(read) => read(args),
+            Callback::Read { cb, trace_scope } => {
+                let _g = trace_scope.try_enter();
+
+                cb(args)
+            }
             other => panic!("expect Callback::Read(..), got {:?}", other),
         }
     }
 
     pub fn is_none(&self) -> bool {
         matches!(self, Callback::None)
+    }
+
+    pub fn with_trace_scope(mut self, scope: Scope) -> Self {
+        match &mut self {
+            Callback::Read { trace_scope, .. } => {
+                *trace_scope = scope;
+            }
+            Callback::Write { trace_scope, .. } => {
+                *trace_scope = scope;
+            }
+            _ => {}
+        }
+        self
+    }
+
+    pub fn access_trace_scope(&self, f: impl FnOnce(&Scope)) {
+        match self {
+            Callback::Read { trace_scope, .. } if !trace_scope.is_empty() => f(trace_scope),
+            Callback::Write { trace_scope, .. } if !trace_scope.is_empty() => f(trace_scope),
+            _ => {}
+        }
     }
 }
 
@@ -152,7 +198,7 @@ where
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Callback::None => write!(fmt, "Callback::None"),
-            Callback::Read(_) => write!(fmt, "Callback::Read(..)"),
+            Callback::Read { .. } => write!(fmt, "Callback::Read(..)"),
             Callback::Write { .. } => write!(fmt, "Callback::Write(..)"),
         }
     }
