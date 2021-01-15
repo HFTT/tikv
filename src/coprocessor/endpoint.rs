@@ -15,6 +15,7 @@ use kvproto::{coprocessor as coppb, errorpb};
 #[cfg(feature = "protobuf-codec")]
 use protobuf::CodedInputStream;
 use protobuf::Message;
+use raftstore::coprocessor::region_info_accessor::{RegionInfoAccessor, RegionInfoProvider as _};
 use tipb::{AnalyzeReq, AnalyzeType, ChecksumRequest, ChecksumScanOn, DagRequest, ExecType};
 
 use crate::server::Config;
@@ -67,6 +68,8 @@ pub struct Endpoint<E: Engine> {
 
     slow_log_threshold: Duration,
 
+    region_info: RegionInfoAccessor,
+
     _phantom: PhantomData<E>,
 }
 
@@ -76,6 +79,7 @@ impl<E: Engine> Endpoint<E> {
     pub fn new(
         cfg: &Config,
         read_pool: ReadPoolHandle,
+        region_info: RegionInfoAccessor,
         concurrency_manager: ConcurrencyManager,
         perf_level: PerfLevel,
     ) -> Self {
@@ -99,6 +103,7 @@ impl<E: Engine> Endpoint<E> {
             stream_channel_size: cfg.end_point_stream_channel_size,
             max_handle_duration: cfg.end_point_request_max_handle_duration.0,
             slow_log_threshold: cfg.end_point_slow_log_threshold.0,
+            region_info,
             _phantom: Default::default(),
         }
     }
