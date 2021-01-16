@@ -686,6 +686,8 @@ impl Endpoint {
                             })
                             .collect();
 
+                        // collect and merge tbl scan results
+                        let mut result: Option<SelectResponse> = None;
                         for spawn_handle in spawn_handles {
                             let resp = match spawn_handle
                                 .await
@@ -694,11 +696,35 @@ impl Endpoint {
                                 Ok(Ok(resp)) => resp,
                                 Ok(Err(err)) | Err(err) => return make_error_response(err),
                             };
+
                             let resp: SelectResponse = resp.unwrap_err().unwrap_err();
+
+                            if let Some(result) = &mut result {
+                                for row in resp.take_rows().into_iter() {
+                                    result.mut_rows().push(row);
+                                }
+                                for output_count in resp.take_output_counts().into_iter() {
+                                    result.mut_output_counts().push(output_count);
+                                }
+                                for chunk in resp.take_chunks().into_iter() {
+                                    result.mut_chunks().push(chunk);
+                                }
+                                for warning in resp.take_warnings().into_iter() {
+                                    result.mut_warnings().push(warning);
+                                }
+                                result.set_warning_count(
+                                    result.get_warning_count() + resp.get_warning_count(),
+                                );
+                            } else {
+                                result = Some(resp);
+                            }
                         }
 
-                        // TODO
-                        coppb::Response::default()
+                        let mut resp = coppb::Response::default();
+                        resp.set_data(result.unwrap().write_to_bytes().unwrap());
+                        resp.set_can_be_cached(false);
+                        resp.set_is_cache_hit(false);
+                        resp
                     }
                     Err(err) => make_error_response(err),
                 },
