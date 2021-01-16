@@ -491,6 +491,8 @@ pub fn set_panic_hook(panic_abort: bool, data_dir: &str) {
             create_panic_mark_file(data_dir.clone());
         }
 
+        std::thread::sleep(Duration::from_secs(3));
+
         if panic_abort {
             process::abort();
         } else {

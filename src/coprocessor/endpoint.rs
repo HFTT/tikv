@@ -579,8 +579,10 @@ impl Endpoint {
                         let regions = self
                             .region_info
                             .get_regions_in_range(
-                                keys.iter().map(|k| k.as_ref()).min().unwrap(),
-                                keys.iter().map(|k| k.as_ref()).max().unwrap(),
+                                // keys.iter().map(|k| k.as_ref()).min().unwrap(),
+                                // keys.iter().map(|k| k.as_ref()).max().unwrap(),
+                                &[],
+                                &[0xff],
                             )
                             .unwrap();
                         let mut range_map = std::collections::BTreeMap::new();
@@ -663,15 +665,16 @@ impl Endpoint {
 
                         // run tbl executor
                         let priority = req_ctx.context.get_priority();
-                        let task_id = req_ctx.build_task_id();
+                        // let task_id = req_ctx.build_task_id();
 
                         let spawn_handles: Vec<_> = builders_and_req_ctxs
                             .into_iter()
                             .map(|(builder, req_ctx)| {
                                 self.read_pool.spawn_handle(
-                                    self.handle_unary_request::<E>(req_ctx, builder, false, true),
+                                    self.handle_unary_request::<E>(req_ctx, builder, false, true).with_scope(Scope::from_local_parent("IndexLookup::table_scan")),
                                     priority,
-                                    task_id,
+                                    // task_id,
+                                    rand::random(),
                                 )
                             })
                             .collect();
