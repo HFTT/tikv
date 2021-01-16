@@ -7,8 +7,8 @@ use crate::codec::data_type::VectorValue;
 use crate::codec::Result;
 use crate::expr::EvalContext;
 
-use std::ops::{Index, IndexMut, Range, RangeFrom, RangeTo};
 use crate::codec::table;
+use std::ops::{Index, IndexMut, Range, RangeFrom, RangeTo};
 
 /// Stores multiple `LazyBatchColumn`s. Each column has an equal length.
 #[derive(Clone, Debug)]
@@ -163,7 +163,8 @@ impl LazyBatchColumnVec {
                     col.encode(*idx, &schema[offset], ctx, &mut output)?;
                     output = table::encode_common_handle_for_test(table_id, &output);
                 } else {
-                    output = table::encode_row_key(table_id, col.decoded().to_int_vec()[*idx].unwrap())
+                    output =
+                        table::encode_row_key(table_id, col.decoded().to_int_vec()[*idx].unwrap())
                 }
             }
             rows.push(output);

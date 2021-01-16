@@ -421,10 +421,7 @@ impl Endpoint {
         return_batch_result: bool,
         return_select_respond: bool,
     ) -> Result<
-        std::result::Result<
-            coppb::Response,
-            std::result::Result<Vec<Vec<u8>>, SelectResponse>,
-        >,
+        std::result::Result<coppb::Response, std::result::Result<Vec<Vec<u8>>, SelectResponse>>,
     > {
         // When this function is being executed, it may be queued for a long time, so that
         // deadline may exceed.
@@ -501,10 +498,7 @@ impl Endpoint {
         return_select_respond: bool,
     ) -> impl Future<
         Output = Result<
-            std::result::Result<
-                coppb::Response,
-                std::result::Result<Vec<Vec<u8>>, SelectResponse>,
-            >,
+            std::result::Result<coppb::Response, std::result::Result<Vec<Vec<u8>>, SelectResponse>>,
         >,
     > {
         let priority = req_ctx.context.get_priority();
@@ -562,8 +556,6 @@ impl Endpoint {
                     )
                 }
             });
-
-        let self_arc = self.clone();
 
         async move {
             match result_of_future {
@@ -630,10 +622,11 @@ impl Endpoint {
                                 let req = req.clone();
                                 let oneshot_table_scan = oneshot_table_scan.clone();
                                 let mut req_ctx = req_ctx.clone();
+                                req_ctx.is_desc_scan = Some(oneshot_table_scan.get_executors().iter().next().unwrap().get_tbl_scan().get_desc());
                                 req_ctx.tag = ReqTag::select;
                                 req_ctx.ranges = ranges.into();
 
-                                self_arc.check_memory_locks(&req_ctx)?;
+                                self.check_memory_locks(&req_ctx)?;
 
                                 let batch_row_limit = self.get_batch_row_limit(false);
                                 let builder: RequestHandlerBuilder<E::Snap> = Box::new(move |snap: E::Snap, req_ctx: &ReqContext| {
@@ -676,8 +669,7 @@ impl Endpoint {
                             .into_iter()
                             .map(|(builder, req_ctx)| {
                                 self.read_pool.spawn_handle(
-                                    self_arc
-                                        .handle_unary_request::<E>(req_ctx, builder, false, true),
+                                    self.handle_unary_request::<E>(req_ctx, builder, false, true),
                                     priority,
                                     task_id,
                                 )

@@ -42,7 +42,7 @@ pub struct BatchExecutorsRunner<SS> {
     // TODO: Deprecate it using a better deadline mechanism.
     deadline: Deadline,
 
-    out_most_executor: Box<dyn BatchExecutor<StorageStats=SS>>,
+    out_most_executor: Box<dyn BatchExecutor<StorageStats = SS>>,
 
     need_common_handle: bool,
 
@@ -93,12 +93,12 @@ impl BatchExecutorsRunner<()> {
                         .map_err(|e| other_err!("BatchSelectionExecutor: {}", e))?;
                 }
                 ExecType::TypeAggregation | ExecType::TypeStreamAgg
-                if ed.get_aggregation().get_group_by().is_empty() =>
-                    {
-                        let descriptor = ed.get_aggregation();
-                        BatchSimpleAggregationExecutor::check_supported(&descriptor)
-                            .map_err(|e| other_err!("BatchSimpleAggregationExecutor: {}", e))?;
-                    }
+                    if ed.get_aggregation().get_group_by().is_empty() =>
+                {
+                    let descriptor = ed.get_aggregation();
+                    BatchSimpleAggregationExecutor::check_supported(&descriptor)
+                        .map_err(|e| other_err!("BatchSimpleAggregationExecutor: {}", e))?;
+                }
                 ExecType::TypeAggregation => {
                     let descriptor = ed.get_aggregation();
                     if BatchFastHashAggregationExecutor::check_supported(&descriptor).is_err() {
@@ -153,13 +153,17 @@ pub fn build_executors<S: Storage + 'static>(
     ranges: Vec<KeyRange>,
     config: Arc<EvalConfig>,
     is_scanned_range_aware: bool,
-) -> Result<(Box<dyn BatchExecutor<StorageStats=S::Statistics>>, i64, bool)> {
+) -> Result<(
+    Box<dyn BatchExecutor<StorageStats = S::Statistics>>,
+    i64,
+    bool,
+)> {
     let mut executor_descriptors = executor_descriptors.into_iter();
     let mut first_ed = executor_descriptors
         .next()
         .ok_or_else(|| other_err!("No executors"))?;
 
-    let mut executor: Box<dyn BatchExecutor<StorageStats=S::Statistics>>;
+    let mut executor: Box<dyn BatchExecutor<StorageStats = S::Statistics>>;
     let mut summary_slot_index = 0;
     let mut need_common_handle = false;
     let table_id;
@@ -183,7 +187,7 @@ pub fn build_executors<S: Storage + 'static>(
                     descriptor.get_desc(),
                     is_scanned_range_aware,
                 )?
-                    .collect_summary(summary_slot_index),
+                .collect_summary(summary_slot_index),
             );
         }
         ExecType::TypeIndexScan => {
@@ -205,7 +209,7 @@ pub fn build_executors<S: Storage + 'static>(
                     descriptor.get_unique(),
                     is_scanned_range_aware,
                 )?
-                    .collect_summary(summary_slot_index),
+                .collect_summary(summary_slot_index),
             );
         }
         _ => {
@@ -219,7 +223,7 @@ pub fn build_executors<S: Storage + 'static>(
     for mut ed in executor_descriptors {
         summary_slot_index += 1;
 
-        let new_executor: Box<dyn BatchExecutor<StorageStats=S::Statistics>> = match ed.get_tp() {
+        let new_executor: Box<dyn BatchExecutor<StorageStats = S::Statistics>> = match ed.get_tp() {
             ExecType::TypeSelection => {
                 EXECUTOR_COUNT_METRICS.batch_selection.inc();
 
@@ -229,23 +233,23 @@ pub fn build_executors<S: Storage + 'static>(
                         executor,
                         ed.take_selection().take_conditions().into(),
                     )?
-                        .collect_summary(summary_slot_index),
+                    .collect_summary(summary_slot_index),
                 )
             }
             ExecType::TypeAggregation | ExecType::TypeStreamAgg
-            if ed.get_aggregation().get_group_by().is_empty() =>
-                {
-                    EXECUTOR_COUNT_METRICS.batch_simple_aggr.inc();
+                if ed.get_aggregation().get_group_by().is_empty() =>
+            {
+                EXECUTOR_COUNT_METRICS.batch_simple_aggr.inc();
 
-                    Box::new(
-                        BatchSimpleAggregationExecutor::new(
-                            config.clone(),
-                            executor,
-                            ed.mut_aggregation().take_agg_func().into(),
-                        )?
-                            .collect_summary(summary_slot_index),
-                    )
-                }
+                Box::new(
+                    BatchSimpleAggregationExecutor::new(
+                        config.clone(),
+                        executor,
+                        ed.mut_aggregation().take_agg_func().into(),
+                    )?
+                    .collect_summary(summary_slot_index),
+                )
+            }
             ExecType::TypeAggregation => {
                 if BatchFastHashAggregationExecutor::check_supported(&ed.get_aggregation()).is_ok()
                 {
@@ -258,7 +262,7 @@ pub fn build_executors<S: Storage + 'static>(
                             ed.mut_aggregation().take_group_by().into(),
                             ed.mut_aggregation().take_agg_func().into(),
                         )?
-                            .collect_summary(summary_slot_index),
+                        .collect_summary(summary_slot_index),
                     )
                 } else {
                     EXECUTOR_COUNT_METRICS.batch_slow_hash_aggr.inc();
@@ -270,7 +274,7 @@ pub fn build_executors<S: Storage + 'static>(
                             ed.mut_aggregation().take_group_by().into(),
                             ed.mut_aggregation().take_agg_func().into(),
                         )?
-                            .collect_summary(summary_slot_index),
+                        .collect_summary(summary_slot_index),
                     )
                 }
             }
@@ -284,7 +288,7 @@ pub fn build_executors<S: Storage + 'static>(
                         ed.mut_aggregation().take_group_by().into(),
                         ed.mut_aggregation().take_agg_func().into(),
                     )?
-                        .collect_summary(summary_slot_index),
+                    .collect_summary(summary_slot_index),
                 )
             }
             ExecType::TypeLimit => {
@@ -315,7 +319,7 @@ pub fn build_executors<S: Storage + 'static>(
                         order_is_desc,
                         d.get_limit() as usize,
                     )?
-                        .collect_summary(summary_slot_index),
+                    .collect_summary(summary_slot_index),
                 )
             }
             _ => {
@@ -332,7 +336,7 @@ pub fn build_executors<S: Storage + 'static>(
 }
 
 impl<SS: 'static> BatchExecutorsRunner<SS> {
-    pub fn from_request<S: Storage<Statistics=SS> + 'static>(
+    pub fn from_request<S: Storage<Statistics = SS> + 'static>(
         mut req: DagRequest,
         ranges: Vec<KeyRange>,
         storage: S,
@@ -549,7 +553,8 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
 
         if return_batch_result {
             let rows = result.physical_columns.encode_rows(
-                &result.logical_rows, &self.output_offsets,
+                &result.logical_rows,
+                &self.output_offsets,
                 self.out_most_executor.schema(),
                 ctx,
                 self.need_common_handle,
