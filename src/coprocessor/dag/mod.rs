@@ -110,8 +110,12 @@ impl RequestHandler for BatchDAGHandler {
         handle_qe_response(result, self.runner.can_be_cached(), self.data_version)
     }
 
-    async fn handle_request_raw(&mut self) -> Result<Vec<BatchExecuteResult>> {
+    async fn handle_request_batch_result(&mut self) -> Result<Vec<BatchExecuteResult>> {
         Ok(self.runner.handle_request(true).await?.unwrap_err())
+    }
+
+    async fn handle_request_select_resp(&mut self) -> Result<SelectResponse> {
+        Ok(self.runner.handle_request(false).await?.unwrap())
     }
 
     fn handle_streaming_request(&mut self) -> Result<(Option<Response>, bool)> {

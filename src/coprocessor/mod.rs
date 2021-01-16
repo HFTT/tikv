@@ -61,8 +61,12 @@ pub trait RequestHandler: Send {
         panic!("unary request is not supported for this handler");
     }
 
-    async fn handle_request_raw(&mut self) -> Result<Vec<BatchExecuteResult>> {
-        panic!("handle_request_raw is not supported for this handler");
+    async fn handle_request_batch_result(&mut self) -> Result<Vec<BatchExecuteResult>> {
+        panic!("handle_request_batch_result is not supported for this handler");
+    }
+
+    async fn handle_request_select_resp(&mut self) -> Result<SelectResponse> {
+        panic!("handle_request_select_resp is not supported for this handler");
     }
 
     /// Processes current request and produces streaming responses.

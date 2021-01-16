@@ -400,8 +400,14 @@ impl Endpoint {
         semaphore: Option<Arc<Semaphore>>,
         mut tracker: Box<Tracker>,
         handler_builder: RequestHandlerBuilder<E::Snap>,
-        return_raw: bool,
-    ) -> Result<std::result::Result<coppb::Response, Vec<BatchExecuteResult>>> {
+        return_batch_result: bool,
+        return_select_respond: bool,
+    ) -> Result<
+        std::result::Result<
+            coppb::Response,
+            std::result::Result<Vec<BatchExecuteResult>, SelectResponse>,
+        >,
+    > {
         // When this function is being executed, it may be queued for a long time, so that
         // deadline may exceed.
         tracker.on_scheduled();
@@ -430,8 +436,10 @@ impl Endpoint {
 
         let handle_request_future = track(
             async {
-                Ok(if return_raw {
-                    Err(handler.handle_request_raw().await?)
+                Ok(if return_batch_result {
+                    Err(Ok(handler.handle_request_batch_result().await?))
+                } else if return_select_respond {
+                    Err(Err(handler.handle_request_select_resp().await?))
                 } else {
                     Ok(handler.handle_request().await?)
                 })
@@ -471,9 +479,16 @@ impl Endpoint {
         &self,
         req_ctx: ReqContext,
         handler_builder: RequestHandlerBuilder<E::Snap>,
-        return_raw: bool,
-    ) -> impl Future<Output = Result<std::result::Result<coppb::Response, Vec<BatchExecuteResult>>>>
-    {
+        return_batch_result: bool,
+        return_select_respond: bool,
+    ) -> impl Future<
+        Output = Result<
+            std::result::Result<
+                coppb::Response,
+                std::result::Result<Vec<BatchExecuteResult>, SelectResponse>,
+            >,
+        >,
+    > {
         let priority = req_ctx.context.get_priority();
         let task_id = req_ctx.build_task_id();
         // box the tracker so that moving it is cheap.
@@ -486,7 +501,8 @@ impl Endpoint {
                     self.semaphore.clone(),
                     tracker,
                     handler_builder,
-                    return_raw,
+                    return_batch_result,
+                    return_select_respond,
                 )
                 .with_scope(Scope::from_local_parent(
                     "Endpoint::handle_unary_request_impl",
@@ -513,12 +529,17 @@ impl Endpoint {
             .map(|(handler_builder, req_ctx, oneshot_table_scan)| {
                 if let Some(oneshot_table_scan) = oneshot_table_scan {
                     (
-                        self.handle_unary_request::<E>(req_ctx.clone(), handler_builder, true),
+                        self.handle_unary_request::<E>(
+                            req_ctx.clone(),
+                            handler_builder,
+                            true,
+                            false,
+                        ),
                         Some((oneshot_table_scan, req_ctx)),
                     )
                 } else {
                     (
-                        self.handle_unary_request::<E>(req_ctx, handler_builder, false),
+                        self.handle_unary_request::<E>(req_ctx, handler_builder, false, false),
                         None,
                     )
                 }
@@ -530,11 +551,14 @@ impl Endpoint {
             match result_of_future {
                 Err(e) => make_error_response(e),
                 Ok((handle_fut, oneshot_table_scan_ctx)) => match handle_fut.await {
+                    Ok(Err(Err(_))) => unreachable!(),
                     Ok(Ok(resp)) => {
+                        let resp: coppb::Response = resp;
                         assert!(oneshot_table_scan_ctx.is_none());
                         resp
                     }
-                    Ok(Err(resp)) => {
+                    Ok(Err(Ok(resp))) => {
+                        let resp: Vec<BatchExecuteResult> = resp;
                         assert!(oneshot_table_scan_ctx.is_some());
                         let (oneshot_table_scan, req_ctx) = oneshot_table_scan_ctx.unwrap();
 
@@ -583,7 +607,7 @@ impl Endpoint {
 
                         // construct tbl executor builder
                         let builders_and_req_ctxs:
-                            Vec<Result<(RequestHandlerBuilder<E::Snap>, ReqContext)>>
+                            Result<Vec<(RequestHandlerBuilder<E::Snap>, ReqContext)>>
                          = keys_group_by_region
                             .into_iter()
                             .map(|(region_idx, ranges)| -> Result<(RequestHandlerBuilder<E::Snap>, ReqContext)> {
@@ -623,28 +647,37 @@ impl Endpoint {
                             })
                             .collect();
 
+                        let builders_and_req_ctxs = match builders_and_req_ctxs {
+                            Ok(builders_and_req_ctxs) => builders_and_req_ctxs,
+                            Err(err) => return make_error_response(err),
+                        };
+
                         // run tbl executor
+                        let priority = req_ctx.context.get_priority();
+                        let task_id = req_ctx.build_task_id();
 
-                        //     let (tx, rx) = mpsc::channel::<Result<coppb::Response>>(self.stream_channel_size);
-                        //     let priority = req_ctx.context.get_priority();
-                        //     let task_id = req_ctx.build_task_id();
-                        //     let tracker = Box::new(Tracker::new(req_ctx, self.slow_log_threshold));
+                        let spawn_handles: Vec<_> = builders_and_req_ctxs
+                            .into_iter()
+                            .map(|(builder, req_ctx)| {
+                                self.read_pool.spawn_handle(
+                                    self_arc
+                                        .handle_unary_request::<E>(req_ctx, builder, false, true),
+                                    priority,
+                                    task_id,
+                                )
+                            })
+                            .collect();
 
-                        //     self.read_pool
-                        //         .spawn(
-                        //             self_arc.handle_unary_request::<E>(req_ctx, handler_builder, false)
-                        //             .then(futures::future::ok::<_, mpsc::SendError>)
-                        //             .forward(tx)
-                        //             .unwrap_or_else(|e| {
-                        //                 warn!("coprocessor stream send error"; "error" => %e);
-                        //             }),
-                        //             priority,
-                        //             task_id,
-                        //         )
-                        //         .map_err(|_| Error::MaxPendingTasksExceeded)?;
-                        //     Ok(rx)
-                        //     self_arc.handle_unary_request::<E>(req_ctx, handler_builder, false);
-                        // }
+                        for spawn_handle in spawn_handles {
+                            let resp = match spawn_handle
+                                .await
+                                .map_err(|_| Error::MaxPendingTasksExceeded)
+                            {
+                                Ok(Ok(resp)) => resp,
+                                Ok(Err(err)) | Err(err) => return make_error_response(err),
+                            };
+                            let resp: SelectResponse = resp.unwrap_err().unwrap_err();
+                        }
 
                         // TODO
                         coppb::Response::default()
