@@ -537,6 +537,7 @@ impl Endpoint {
 
                         // decode handle to keys
                         let mut keys: Vec<Vec<u8>> = todo!();
+                        keys.sort();
 
                         let regions = self
                             .region_info
@@ -561,8 +562,12 @@ impl Endpoint {
                                 let entry = keys_group_by_region.entry(idx).or_insert(Vec::new());
                                 (*entry).push(coppb::KeyRange {
                                     start: key.clone(),
-                                    end: key,
-                                    ..coppb::KeyRange::new()
+                                    end: {
+                                        let mut key = key;
+                                        key.push(0);
+                                        key
+                                    },
+                                    ..coppb::KeyRange::default()
                                 });
                             } else {
                                 // Key before the first region
