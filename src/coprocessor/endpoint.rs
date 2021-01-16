@@ -530,7 +530,6 @@ impl Endpoint {
     /// errors during parsing or handling, they will be converted into a `Response` as the success
     /// result of the future.
     #[inline]
-    #[trace("Endpoint::parse_and_handle_unary_request")]
     pub fn parse_and_handle_unary_request<E: Engine>(
         self: Arc<Self>,
         req: coppb::Request,
@@ -667,18 +666,10 @@ impl Endpoint {
                         };
 
                         // run tbl executor
-                        let priority = req_ctx.context.get_priority();
-                        // let task_id = req_ctx.build_task_id();
-
                         let spawn_handles: Vec<_> = builders_and_req_ctxs
                             .into_iter()
                             .map(|(builder, req_ctx)| {
-                                self.read_pool.spawn_handle(
-                                    self.handle_unary_request::<E>(req_ctx, builder, false, true).with_scope(Scope::from_local_parent("IndexLookup::table_scan")),
-                                    priority,
-                                    // task_id,
-                                    rand::random(),
-                                )
+                                    self.handle_unary_request::<E>(req_ctx, builder, false, true)
                             })
                             .collect();
 
@@ -689,8 +680,8 @@ impl Endpoint {
                                 .await
                                 .map_err(|_| Error::MaxPendingTasksExceeded)
                             {
-                                Ok(Ok(resp)) => resp,
-                                Ok(Err(err)) | Err(err) => return make_error_response(err),
+                                Ok(resp) => resp,
+                                Err(err) => return make_error_response(err),
                             };
 
                             let mut resp: SelectResponse = resp.unwrap_err().unwrap_err();
@@ -725,7 +716,7 @@ impl Endpoint {
                     Err(err) => make_error_response(err),
                 },
             }
-        }
+        }.with_scope(Scope::from_local_parent("Endpoint::parse_and_handle_unary_request"))
     }
 
     /// The real implementation of handling a stream request.
