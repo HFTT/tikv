@@ -570,9 +570,12 @@ impl Endpoint {
                     Ok(Err(Ok(resp))) => {
                         assert!(oneshot_table_scan_ctx.is_some());
                         let (oneshot_table_scan, req_ctx) = oneshot_table_scan_ctx.unwrap();
-                        // decode handle to keys
                         let mut keys: Vec<Vec<u8>> = resp;
                         keys.sort();
+
+                        if keys.is_empty() {
+                            return coppb::Response::default();
+                        }
 
                         // get available regions
                         // TODO: filter foller region
