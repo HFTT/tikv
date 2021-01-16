@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use kvproto::coprocessor::{KeyRange, Response};
 use protobuf::Message;
 use tidb_query_common::storage::IntervalRange;
+use tidb_query_executors::interface::BatchExecuteResult;
 use tipb::{DagRequest, SelectResponse, StreamResponse};
 
 use crate::coprocessor::metrics::*;
@@ -101,12 +102,16 @@ impl BatchDAGHandler {
 #[async_trait]
 impl RequestHandler for BatchDAGHandler {
     async fn handle_request(&mut self) -> Result<Response> {
-        let result = self.runner.handle_request().await;
+        let result = self
+            .runner
+            .handle_request(false)
+            .await
+            .map(std::result::Result::unwrap);
         handle_qe_response(result, self.runner.can_be_cached(), self.data_version)
     }
 
-    async fn handle_request_raw(&mut self) -> Result<SelectResponse> {
-        Ok(self.runner.handle_request().await?)
+    async fn handle_request_raw(&mut self) -> Result<Vec<BatchExecuteResult>> {
+        Ok(self.runner.handle_request(true).await?.unwrap_err())
     }
 
     fn handle_streaming_request(&mut self) -> Result<(Option<Response>, bool)> {

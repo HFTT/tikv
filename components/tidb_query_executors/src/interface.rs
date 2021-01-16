@@ -143,6 +143,7 @@ impl<C: ExecSummaryCollector + Send, T: BatchExecutor> BatchExecutor
 ///
 /// It is designed to be used in new generation executors, i.e. executors support batch execution.
 /// The old executors will not be refined to return this kind of result.
+#[derive(Debug)]
 pub struct BatchExecuteResult {
     /// The *physical* columns data generated during this invocation.
     ///

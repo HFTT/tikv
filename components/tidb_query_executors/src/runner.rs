@@ -14,6 +14,8 @@ use tipb::{self, ExecType, ExecutorExecutionSummary, FieldType};
 use tipb::{Chunk, DagRequest, EncodeType, SelectResponse};
 use yatp::task::future::reschedule;
 
+use crate::interface::BatchExecuteResult;
+
 use super::interface::{BatchExecutor, ExecuteStats};
 use super::*;
 use tidb_query_common::metrics::*;
@@ -382,8 +384,12 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         BATCH_INITIAL_SIZE
     }
 
-    pub async fn handle_request(&mut self) -> Result<SelectResponse> {
+    pub async fn handle_request(
+        &mut self,
+        return_batch_result: bool,
+    ) -> Result<std::result::Result<SelectResponse, Vec<BatchExecuteResult>>> {
         let mut chunks = vec![];
+        let mut batch_results = vec![];
         let mut batch_size = Self::batch_initial_size();
         let mut warnings = self.config.new_eval_warnings();
         let mut ctx = EvalContext::new(self.config.clone());
@@ -399,19 +405,30 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
 
             let mut chunk = Chunk::default();
 
-            let (drained, record_len) = self.internal_handle_request(
+            let (drained, record_len, batch_result) = self.internal_handle_request(
                 false,
                 batch_size,
                 &mut chunk,
                 &mut warnings,
                 &mut ctx,
+                return_batch_result,
             )?;
 
-            if record_len > 0 {
-                chunks.push(chunk);
+            if let Some(batch_result) = batch_result {
+                if record_len > 0 {
+                    batch_results.push(batch_result);
+                }
+            } else {
+                if record_len > 0 {
+                    chunks.push(chunk);
+                }
             }
 
             if drained {
+                if return_batch_result {
+                    return Ok(Err(batch_results));
+                }
+
                 self.out_most_executor
                     .collect_exec_stats(&mut self.exec_stats);
 
@@ -450,7 +467,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
                 // In case of this function is called multiple times.
                 self.exec_stats.clear();
 
-                return Ok(sel_resp);
+                return Ok(Ok(sel_resp));
             }
 
             // Grow batch size
@@ -471,12 +488,13 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         // record count less than batch size and is not drained
         while record_len < self.stream_row_limit && !is_drained {
             let mut current_chunk = Chunk::default();
-            let (drained, len) = self.internal_handle_request(
+            let (drained, len, _) = self.internal_handle_request(
                 true,
                 batch_size.min(self.stream_row_limit - record_len),
                 &mut current_chunk,
                 &mut warnings,
                 &mut ctx,
+                false,
             )?;
             chunk
                 .mut_rows_data()
@@ -509,7 +527,8 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         chunk: &mut Chunk,
         warnings: &mut EvalWarnings,
         ctx: &mut EvalContext,
-    ) -> Result<(bool, usize)> {
+        return_batch_result: bool,
+    ) -> Result<(bool, usize, Option<BatchExecuteResult>)> {
         let mut record_len = 0;
 
         self.deadline.check()?;
@@ -517,6 +536,11 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         let mut result = self.out_most_executor.next_batch(batch_size);
 
         let is_drained = result.is_drained?;
+        result.is_drained = Ok(is_drained);
+
+        if return_batch_result {
+            return Ok((is_drained, result.logical_rows.len(), Some(result)));
+        }
 
         if !result.logical_rows.is_empty() {
             assert_eq!(
@@ -559,7 +583,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         }
 
         warnings.merge(&mut result.warnings);
-        Ok((is_drained, record_len))
+        Ok((is_drained, record_len, None))
     }
 
     fn make_stream_response(
