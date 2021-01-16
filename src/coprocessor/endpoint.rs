@@ -209,6 +209,7 @@ impl Endpoint {
                 parser.merge_to(&mut dag)?;
                 let mut table_scan = false;
                 let mut is_desc_scan = false;
+                let mut index_lookup = false;
                 if let Some(scan) = dag.get_executors().iter().next() {
                     match scan.get_tp() {
                         ExecType::TypeTableScan => {
@@ -219,16 +220,34 @@ impl Endpoint {
                             is_desc_scan = scan.get_idx_scan().get_desc();
                             table_scan = false;
                         }
-                        // TODO?
-                        ExecType::TypeIndexScan => {
-                            dag = todo!();
-                            oneshot_table_dag = todo!();
-                            is_desc_scan = scan.get_idx_scan().get_desc();
-                            table_scan = false;
+                        ExecType::TypeOneTripIndexLookup => {
+                            index_lookup = true;
                         }
                         _ => {}
                     }
                 }
+
+                if index_lookup {
+                    let mut executor = dag
+                        .take_executors()
+                        .into_iter()
+                        .next()
+                        .unwrap()
+                        .take_one_trip_idx_lookup();
+
+                    dag = executor.take_idx_scan();
+                    is_desc_scan = dag
+                        .get_executors()
+                        .iter()
+                        .next()
+                        .unwrap()
+                        .get_idx_scan()
+                        .get_desc();
+                    table_scan = false;
+
+                    oneshot_table_dag = Some(executor.take_tbl_scan());
+                }
+
                 if start_ts == 0 {
                     start_ts = dag.get_start_ts_fallback();
                 }
@@ -561,7 +580,6 @@ impl Endpoint {
                         let resp: Vec<BatchExecuteResult> = resp;
                         assert!(oneshot_table_scan_ctx.is_some());
                         let (oneshot_table_scan, req_ctx) = oneshot_table_scan_ctx.unwrap();
-
                         // decode handle to keys
                         let mut keys: Vec<Vec<u8>> = todo!();
                         keys.sort();
