@@ -72,7 +72,7 @@ pub struct Endpoint {
 
     region_info: RegionInfoAccessor,
 
-    region_cache: Arc<tokio::sync::RwLock<(BTreeMap<Vec<u8>, Region>, Instant)>>,
+    region_cache: Arc<tokio::sync::RwLock<(Vec<Region>, Instant)>>,
 }
 
 impl tikv_util::AssertSend for Endpoint {}
@@ -107,7 +107,7 @@ impl Endpoint {
             slow_log_threshold: cfg.end_point_slow_log_threshold.0,
             region_info,
             region_cache: Arc::new(tokio::sync::RwLock::new((
-                BTreeMap::new(),
+                Vec::new(),
                 Instant::now() - Duration::from_secs(1),
             ))),
         }
@@ -588,7 +588,7 @@ impl Endpoint {
                         // get available regions
                         // TODO: filter foller region
                         if self.region_cache.read().await.1.elapsed().as_micros() > 500 {
-                            let regions = self
+                            let mut regions = self
                                 .region_info
                                 .get_regions_in_range(
                                     // keys.iter().map(|k| k.as_ref()).min().unwrap(),
@@ -597,19 +597,16 @@ impl Endpoint {
                                     &[0xff],
                                 )
                                 .unwrap();
-                            let mut range_map = std::collections::BTreeMap::new();
-                            for region in regions.into_iter() {
-                                range_map.insert(region.start_key.clone(), region);
-                            }
-                            *self.region_cache.write().await = (range_map, Instant::now());
+                            regions.sort_by(|a, b| a.start_key.partial_cmp(&b.start_key).unwrap());
+                            *self.region_cache.write().await = (regions, Instant::now());
                         }
 
                         let mut keys_group_by_region = std::collections::HashMap::new();
                         {
                             // group keys by leader regions
-                            let range_map = &self.region_cache.read().await.0;
+                            let regions = &self.region_cache.read().await.0;
                             for key in keys {
-                                if let Some((_, region)) = range_map.range(..=key.clone()).next_back() {
+                                if let Some(region) = regions.iter().rev().find(|region| region.start_key< key) {
                                     if region.end_key <= key {
                                         // key isn't in any region
                                         todo!()
