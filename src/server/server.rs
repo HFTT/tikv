@@ -74,7 +74,7 @@ impl<T: RaftStoreRouter<RocksEngine> + Unpin, S: StoreAddrResolver + 'static> Se
         cfg: &Arc<Config>,
         security_mgr: &Arc<SecurityManager>,
         storage: Storage<E, L>,
-        cop: Endpoint<E>,
+        cop: Endpoint,
         raft_router: T,
         resolver: S,
         snap_mgr: SnapManager,

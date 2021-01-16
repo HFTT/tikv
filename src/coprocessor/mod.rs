@@ -43,6 +43,7 @@ use metrics::ReqTag;
 use rand::prelude::*;
 use tikv_util::deadline::Deadline;
 use tikv_util::time::Duration;
+use tipb::SelectResponse;
 use txn_types::TsSet;
 
 pub const REQ_TYPE_DAG: i64 = 103;
@@ -57,6 +58,10 @@ pub trait RequestHandler: Send {
     /// Processes current request and produces a response.
     async fn handle_request(&mut self) -> Result<coppb::Response> {
         panic!("unary request is not supported for this handler");
+    }
+
+    async fn handle_request_raw(&mut self) -> Result<SelectResponse> {
+        panic!("handle_request_raw is not supported for this handler");
     }
 
     /// Processes current request and produces streaming responses.

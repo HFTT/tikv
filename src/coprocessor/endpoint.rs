@@ -42,7 +42,7 @@ const LIGHT_TASK_THRESHOLD: Duration = Duration::from_millis(5);
 
 /// A pool to build and run Coprocessor request handlers.
 #[derive(Clone)]
-pub struct Endpoint<E: Engine> {
+pub struct Endpoint {
     /// The thread pool to run Coprocessor requests.
     read_pool: ReadPoolHandle,
 
@@ -69,13 +69,11 @@ pub struct Endpoint<E: Engine> {
     slow_log_threshold: Duration,
 
     region_info: RegionInfoAccessor,
-
-    _phantom: PhantomData<E>,
 }
 
-impl<E: Engine> tikv_util::AssertSend for Endpoint<E> {}
+impl tikv_util::AssertSend for Endpoint {}
 
-impl<E: Engine> Endpoint<E> {
+impl Endpoint {
     pub fn new(
         cfg: &Config,
         read_pool: ReadPoolHandle,
@@ -104,7 +102,6 @@ impl<E: Engine> Endpoint<E> {
             max_handle_duration: cfg.end_point_request_max_handle_duration.0,
             slow_log_threshold: cfg.end_point_slow_log_threshold.0,
             region_info,
-            _phantom: Default::default(),
         }
     }
 
@@ -134,12 +131,16 @@ impl<E: Engine> Endpoint<E> {
     /// Returns `Err` if fails.
     ///
     /// It also checks if there are locks in memory blocking this read request.
-    fn parse_request_and_check_memory_locks(
+    fn parse_request_and_check_memory_locks<E: Engine>(
         &self,
         mut req: coppb::Request,
         peer: Option<String>,
         is_streaming: bool,
-    ) -> Result<(RequestHandlerBuilder<E::Snap>, ReqContext)> {
+    ) -> Result<(
+        RequestHandlerBuilder<E::Snap>,
+        ReqContext,
+        Option<DagRequest>,
+    )> {
         // This `Parser` is here because rust-proto supports customising its
         // recursion limit and Prost does not. Therefore we end up doing things
         // a bit differently for the two codecs.
@@ -200,6 +201,7 @@ impl<E: Engine> Endpoint<E> {
         let mut parser = Parser::new(&data, self.recursion_limit);
         let req_ctx: ReqContext;
         let builder: RequestHandlerBuilder<E::Snap>;
+        let mut oneshot_table_dag = None;
 
         match req.get_tp() {
             REQ_TYPE_DAG => {
@@ -208,11 +210,23 @@ impl<E: Engine> Endpoint<E> {
                 let mut table_scan = false;
                 let mut is_desc_scan = false;
                 if let Some(scan) = dag.get_executors().iter().next() {
-                    table_scan = scan.get_tp() == ExecType::TypeTableScan;
-                    if table_scan {
-                        is_desc_scan = scan.get_tbl_scan().get_desc();
-                    } else {
-                        is_desc_scan = scan.get_idx_scan().get_desc();
+                    match scan.get_tp() {
+                        ExecType::TypeTableScan => {
+                            is_desc_scan = scan.get_tbl_scan().get_desc();
+                            table_scan = true;
+                        }
+                        ExecType::TypeIndexScan => {
+                            is_desc_scan = scan.get_idx_scan().get_desc();
+                            table_scan = false;
+                        }
+                        // TODO?
+                        ExecType::TypeIndexScan => {
+                            dag = todo!();
+                            oneshot_table_dag = todo!();
+                            is_desc_scan = scan.get_idx_scan().get_desc();
+                            table_scan = false;
+                        }
+                        _ => {}
                     }
                 }
                 if start_ts == 0 {
@@ -340,7 +354,7 @@ impl<E: Engine> Endpoint<E> {
             }
             tp => return Err(box_err!("unsupported tp {}", tp)),
         };
-        Ok((builder, req_ctx))
+        Ok((builder, req_ctx, oneshot_table_dag))
     }
 
     /// Get the batch row limit configuration.
@@ -354,7 +368,7 @@ impl<E: Engine> Endpoint<E> {
     }
 
     #[inline]
-    fn async_snapshot(
+    fn async_snapshot<E: Engine>(
         engine: &E,
         ctx: &ReqContext,
     ) -> impl std::future::Future<Output = Result<E::Snap>> {
@@ -382,11 +396,12 @@ impl<E: Engine> Endpoint<E> {
     /// It first retrieves a snapshot, then builds the `RequestHandler` over the snapshot and
     /// the given `handler_builder`. Finally, it calls the unary request interface of the
     /// `RequestHandler` to process the request and produce a result.
-    async fn handle_unary_request_impl(
+    async fn handle_unary_request_impl<E: Engine>(
         semaphore: Option<Arc<Semaphore>>,
         mut tracker: Box<Tracker>,
         handler_builder: RequestHandlerBuilder<E::Snap>,
-    ) -> Result<coppb::Response> {
+        return_raw: bool,
+    ) -> Result<std::result::Result<coppb::Response, tipb::SelectResponse>> {
         // When this function is being executed, it may be queued for a long time, so that
         // deadline may exceed.
         tracker.on_scheduled();
@@ -394,9 +409,10 @@ impl<E: Engine> Endpoint<E> {
 
         // Safety: spawning this function using a `FuturePool` ensures that a TLS engine
         // exists.
-        let snapshot =
-            unsafe { with_tls_engine(|engine| Self::async_snapshot(engine, &tracker.req_ctx)) }
-                .await?;
+        let snapshot = unsafe {
+            with_tls_engine::<E, _, _>(|engine| Self::async_snapshot(engine, &tracker.req_ctx))
+        }
+        .await?;
         // When snapshot is retrieved, deadline may exceed.
         tracker.on_snapshot_finished();
         tracker.req_ctx.deadline.check()?;
@@ -412,7 +428,16 @@ impl<E: Engine> Endpoint<E> {
 
         tracker.on_begin_all_items();
 
-        let handle_request_future = track(handler.handle_request(), &mut tracker);
+        let handle_request_future = track(
+            async {
+                Ok(if return_raw {
+                    Err(handler.handle_request_raw().await?)
+                } else {
+                    Ok(handler.handle_request().await?)
+                })
+            },
+            &mut tracker,
+        );
         let result = if let Some(semaphore) = &semaphore {
             limit_concurrency(handle_request_future, semaphore, LIGHT_TASK_THRESHOLD).await
         } else {
@@ -427,27 +452,28 @@ impl<E: Engine> Endpoint<E> {
         let (exec_details, exec_details_v2) = tracker.get_exec_details();
         tracker.on_finish_all_items();
 
-        let mut resp = match result {
-            Ok(resp) => {
-                COPR_RESP_SIZE.inc_by(resp.data.len() as i64);
-                resp
+        match result {
+            Ok(Ok(mut resp)) => {
+                resp.set_exec_details(exec_details);
+                resp.set_exec_details_v2(exec_details_v2);
+                Ok(Ok(resp))
             }
-            Err(e) => make_error_response(e),
-        };
-        resp.set_exec_details(exec_details);
-        resp.set_exec_details_v2(exec_details_v2);
-        Ok(resp)
+            Err(e) => Ok(Ok(make_error_response(e))),
+            other => other,
+        }
     }
 
     /// Handle a unary request and run on the read pool.
     ///
     /// Returns `Err(err)` if the read pool is full. Returns `Ok(future)` in other cases.
     /// The future inside may be an error however.
-    fn handle_unary_request(
+    fn handle_unary_request<E: Engine>(
         &self,
         req_ctx: ReqContext,
         handler_builder: RequestHandlerBuilder<E::Snap>,
-    ) -> impl Future<Output = Result<coppb::Response>> {
+        return_raw: bool,
+    ) -> impl Future<Output = Result<std::result::Result<coppb::Response, tipb::SelectResponse>>>
+    {
         let priority = req_ctx.context.get_priority();
         let task_id = req_ctx.build_task_id();
         // box the tracker so that moving it is cheap.
@@ -456,10 +482,15 @@ impl<E: Engine> Endpoint<E> {
         let res = self
             .read_pool
             .spawn_handle(
-                Self::handle_unary_request_impl(self.semaphore.clone(), tracker, handler_builder)
-                    .with_scope(Scope::from_local_parent(
-                        "Endpoint::handle_unary_request_impl",
-                    )),
+                Self::handle_unary_request_impl::<E>(
+                    self.semaphore.clone(),
+                    tracker,
+                    handler_builder,
+                    return_raw,
+                )
+                .with_scope(Scope::from_local_parent(
+                    "Endpoint::handle_unary_request_impl",
+                )),
                 priority,
                 task_id,
             )
@@ -472,19 +503,41 @@ impl<E: Engine> Endpoint<E> {
     /// result of the future.
     #[inline]
     #[trace("Endpoint::parse_and_handle_unary_request")]
-    pub fn parse_and_handle_unary_request(
+    pub fn parse_and_handle_unary_request<E: Engine>(
         &self,
         req: coppb::Request,
         peer: Option<String>,
     ) -> impl Future<Output = coppb::Response> {
         let result_of_future = self
-            .parse_request_and_check_memory_locks(req, peer, false)
-            .map(|(handler_builder, req_ctx)| self.handle_unary_request(req_ctx, handler_builder));
+            .parse_request_and_check_memory_locks::<E>(req, peer, false)
+            .map(|(handler_builder, req_ctx, oneshot_table_scan)| {
+                if let Some(oneshot_table_scan) = oneshot_table_scan {
+                    (
+                        self.handle_unary_request::<E>(req_ctx.clone(), handler_builder, true),
+                        Some(oneshot_table_scan),
+                    )
+                } else {
+                    (
+                        self.handle_unary_request::<E>(req_ctx.clone(), handler_builder, false),
+                        None,
+                    )
+                }
+            });
 
         async move {
             match result_of_future {
                 Err(e) => make_error_response(e),
-                Ok(handle_fut) => handle_fut.await.unwrap_or_else(make_error_response),
+                Ok((handle_fut, oneshot_table_scan)) => match handle_fut.await {
+                    Ok(Ok(resp)) => {
+                        assert!(oneshot_table_scan.is_none());
+                        resp
+                    }
+                    Ok(Err(resp)) => {
+                        assert!(oneshot_table_scan.is_some());
+                        todo!()
+                    }
+                    Err(err) => make_error_response(err),
+                },
             }
         }
     }
@@ -494,7 +547,7 @@ impl<E: Engine> Endpoint<E> {
     /// It first retrieves a snapshot, then builds the `RequestHandler` over the snapshot and
     /// the given `handler_builder`. Finally, it calls the stream request interface of the
     /// `RequestHandler` multiple times to process the request and produce multiple results.
-    fn handle_stream_request_impl(
+    fn handle_stream_request_impl<E: Engine>(
         semaphore: Option<Arc<Semaphore>>,
         mut tracker: Box<Tracker>,
         handler_builder: RequestHandlerBuilder<E::Snap>,
@@ -514,7 +567,7 @@ impl<E: Engine> Endpoint<E> {
             // Safety: spawning this function using a `FuturePool` ensures that a TLS engine
             // exists.
             let snapshot = unsafe {
-                with_tls_engine(|engine| Self::async_snapshot(engine, &tracker.req_ctx))
+                with_tls_engine::<E, _, _>(|engine| Self::async_snapshot(engine, &tracker.req_ctx))
             }
             .await?;
             // When snapshot is retrieved, deadline may exceed.
@@ -570,7 +623,7 @@ impl<E: Engine> Endpoint<E> {
     ///
     /// Returns `Err(err)` if the read pool is full. Returns `Ok(stream)` in other cases.
     /// The stream inside may produce errors however.
-    fn handle_stream_request(
+    fn handle_stream_request<E: Engine>(
         &self,
         req_ctx: ReqContext,
         handler_builder: RequestHandlerBuilder<E::Snap>,
@@ -582,12 +635,16 @@ impl<E: Engine> Endpoint<E> {
 
         self.read_pool
             .spawn(
-                Self::handle_stream_request_impl(self.semaphore.clone(), tracker, handler_builder)
-                    .then(futures::future::ok::<_, mpsc::SendError>)
-                    .forward(tx)
-                    .unwrap_or_else(|e| {
-                        warn!("coprocessor stream send error"; "error" => %e);
-                    }),
+                Self::handle_stream_request_impl::<E>(
+                    self.semaphore.clone(),
+                    tracker,
+                    handler_builder,
+                )
+                .then(futures::future::ok::<_, mpsc::SendError>)
+                .forward(tx)
+                .unwrap_or_else(|e| {
+                    warn!("coprocessor stream send error"; "error" => %e);
+                }),
                 priority,
                 task_id,
             )
@@ -599,15 +656,15 @@ impl<E: Engine> Endpoint<E> {
     /// `Response` and will never fail. If there are errors during parsing or handling, they will
     /// be converted into a `Response` as the only stream item.
     #[inline]
-    pub fn parse_and_handle_stream_request(
+    pub fn parse_and_handle_stream_request<E: Engine>(
         &self,
         req: coppb::Request,
         peer: Option<String>,
     ) -> impl futures::stream::Stream<Item = coppb::Response> {
         let result_of_stream = self
-            .parse_request_and_check_memory_locks(req, peer, true)
-            .and_then(|(handler_builder, req_ctx)| {
-                self.handle_stream_request(req_ctx, handler_builder)
+            .parse_request_and_check_memory_locks::<E>(req, peer, true)
+            .and_then(|(handler_builder, req_ctx, _)| {
+                self.handle_stream_request::<E>(req_ctx, handler_builder)
             }); // Result<Stream<Resp, Error>, Error>
 
         futures::stream::once(futures::future::ready(result_of_stream)) // Stream<Stream<Resp, Error>, Error>

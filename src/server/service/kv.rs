@@ -56,7 +56,7 @@ pub struct Service<T: RaftStoreRouter<RocksEngine> + 'static, E: Engine, L: Lock
     // For handling KV requests.
     storage: Storage<E, L>,
     // For handling coprocessor requests.
-    cop: Endpoint<E>,
+    cop: Arc<Endpoint>,
     // For handling raft messages.
     ch: T,
     // For handling snapshot.
@@ -98,7 +98,7 @@ impl<T: RaftStoreRouter<RocksEngine> + 'static, E: Engine, L: LockManager> Servi
     pub fn new(
         storage: Storage<E, L>,
         gc_worker: GcWorker<E, T>,
-        cop: Endpoint<E>,
+        cop: Endpoint,
         ch: T,
         snap_scheduler: Scheduler<SnapTask>,
         grpc_thread_load: Arc<ThreadLoad>,
@@ -109,7 +109,7 @@ impl<T: RaftStoreRouter<RocksEngine> + 'static, E: Engine, L: LockManager> Servi
         Service {
             gc_worker,
             storage,
-            cop,
+            cop: Arc::new(cop),
             ch,
             snap_scheduler,
             grpc_thread_load,
@@ -305,7 +305,7 @@ impl<T: RaftStoreRouter<RocksEngine> + 'static, E: Engine, L: LockManager> Tikv
             CoprocessorResponse
         );
         let _g = scope.enter();
-        let future = future_cop(&self.cop, Some(ctx.peer()), req);
+        let future = future_cop(&self.cop, &self.storage, Some(ctx.peer()), req);
         let task = async move {
             let mut resp = future.await?;
             drop(scope);
@@ -552,9 +552,8 @@ impl<T: RaftStoreRouter<RocksEngine> + 'static, E: Engine, L: LockManager> Tikv
     ) {
         let begin_instant = Instant::now_coarse();
 
-        let mut stream = self
-            .cop
-            .parse_and_handle_stream_request(req, Some(ctx.peer()))
+        let mut stream = (&*self.cop)
+            .parse_and_handle_stream_request::<E>(req, Some(ctx.peer()))
             .map(|resp| {
                 GrpcResult::<(Response, WriteFlags)>::Ok((
                     resp,
@@ -1067,7 +1066,7 @@ fn response_batch_commands_request<F>(
 fn handle_batch_commands_request<E: Engine, L: LockManager>(
     batcher: &mut Option<ReqBatcher>,
     storage: &Storage<E, L>,
-    cop: &Endpoint<E>,
+    cop: &Endpoint,
     trace_reporter: &Arc<TraceReporter>,
     peer: &str,
     id: u64,
@@ -1189,7 +1188,7 @@ fn handle_batch_commands_request<E: Engine, L: LockManager>(
         VerBatchMut, future_ver_batch_mut(storage), ver_batch_mut;
         VerScan, future_ver_scan(storage), ver_scan;
         VerDeleteRange, future_ver_delete_range(storage), ver_delete_range;
-        Coprocessor, future_cop(cop, Some(peer.to_string())), coprocessor;
+        Coprocessor, future_cop(cop, storage, Some(peer.to_string())), coprocessor;
         PessimisticLock, future_acquire_pessimistic_lock(storage), kv_pessimistic_lock;
         PessimisticRollback, future_pessimistic_rollback(storage), kv_pessimistic_rollback;
     }
@@ -1640,12 +1639,13 @@ fn future_ver_delete_range<E: Engine, L: LockManager>(
     future::ok(resp)
 }
 
-fn future_cop<E: Engine>(
-    cop: &Endpoint<E>,
+fn future_cop<E: Engine, L: LockManager>(
+    cop: &Endpoint,
+    _storage: &Storage<E, L>,
     peer: Option<String>,
     req: Request,
 ) -> impl Future<Output = ServerResult<Response>> {
-    let ret = cop.parse_and_handle_unary_request(req, peer);
+    let ret = cop.parse_and_handle_unary_request::<E>(req, peer);
     async move { Ok(ret.await) }
 }
 
