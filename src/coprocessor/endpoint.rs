@@ -1,7 +1,9 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::*;
 use std::{borrow::Cow, time::Duration};
 
 use async_stream::try_stream;
@@ -10,6 +12,7 @@ use futures::prelude::*;
 use tokio::sync::Semaphore;
 
 use kvproto::kvrpcpb::{self, IsolationLevel};
+use kvproto::metapb::Region;
 use kvproto::{coprocessor as coppb, errorpb};
 #[cfg(feature = "protobuf-codec")]
 use protobuf::CodedInputStream;
@@ -68,6 +71,8 @@ pub struct Endpoint {
     slow_log_threshold: Duration,
 
     region_info: RegionInfoAccessor,
+
+    region_cache: Arc<tokio::sync::RwLock<(BTreeMap<Vec<u8>, Region>, Instant)>>,
 }
 
 impl tikv_util::AssertSend for Endpoint {}
@@ -101,6 +106,10 @@ impl Endpoint {
             max_handle_duration: cfg.end_point_request_max_handle_duration.0,
             slow_log_threshold: cfg.end_point_slow_log_threshold.0,
             region_info,
+            region_cache: Arc::new(tokio::sync::RwLock::new((
+                BTreeMap::new(),
+                Instant::now() - Duration::from_secs(1),
+            ))),
         }
     }
 
@@ -578,42 +587,47 @@ impl Endpoint {
 
                         // get available regions
                         // TODO: filter foller region
-                        let regions = self
-                            .region_info
-                            .get_regions_in_range(
-                                // keys.iter().map(|k| k.as_ref()).min().unwrap(),
-                                // keys.iter().map(|k| k.as_ref()).max().unwrap(),
-                                &[],
-                                &[0xff],
-                            )
-                            .unwrap();
-                        let mut range_map = std::collections::BTreeMap::new();
-                        for (idx, region) in regions.iter().enumerate() {
-                            range_map.insert(region.start_key.clone(), idx);
+                        if self.region_cache.read().await.1.elapsed().as_micros() > 500 {
+                            let regions = self
+                                .region_info
+                                .get_regions_in_range(
+                                    // keys.iter().map(|k| k.as_ref()).min().unwrap(),
+                                    // keys.iter().map(|k| k.as_ref()).max().unwrap(),
+                                    &[],
+                                    &[0xff],
+                                )
+                                .unwrap();
+                            let mut range_map = std::collections::BTreeMap::new();
+                            for region in regions.into_iter() {
+                                range_map.insert(region.start_key.clone(), region);
+                            }
+                            *self.region_cache.write().await = (range_map, Instant::now());
                         }
 
-                        // group keys by leader regions
                         let mut keys_group_by_region = std::collections::HashMap::new();
-                        for key in keys {
-                            if let Some((_, idx)) = range_map.range(..=key.clone()).next_back() {
-                                let region = &regions[*idx];
-                                if region.end_key <= key {
-                                    // key isn't in any region
+                        {
+                            // group keys by leader regions
+                            let range_map = &self.region_cache.read().await.0;
+                            for key in keys {
+                                if let Some((_, region)) = range_map.range(..=key.clone()).next_back() {
+                                    if region.end_key <= key {
+                                        // key isn't in any region
+                                        todo!()
+                                    }
+                                    let entry = keys_group_by_region.entry(region.id).or_insert(Vec::new());
+                                    (*entry).push(coppb::KeyRange {
+                                        start: key.clone(),
+                                        end: {
+                                            let mut key = key;
+                                            key.push(0);
+                                            key
+                                        },
+                                        ..coppb::KeyRange::default()
+                                    });
+                                } else {
+                                    // Key before the first region
                                     todo!()
                                 }
-                                let entry = keys_group_by_region.entry(idx).or_insert(Vec::new());
-                                (*entry).push(coppb::KeyRange {
-                                    start: key.clone(),
-                                    end: {
-                                        let mut key = key;
-                                        key.push(0);
-                                        key
-                                    },
-                                    ..coppb::KeyRange::default()
-                                });
-                            } else {
-                                // Key before the first region
-                                todo!()
                             }
                         }
 
@@ -622,7 +636,7 @@ impl Endpoint {
                             Result<Vec<(RequestHandlerBuilder<E::Snap>, ReqContext)>>
                          = keys_group_by_region
                             .into_iter()
-                            .map(|(_region_idx, ranges)| -> Result<(RequestHandlerBuilder<E::Snap>, ReqContext)> {
+                            .map(|(_region_id, ranges)| -> Result<(RequestHandlerBuilder<E::Snap>, ReqContext)> {
                                 let req = req.clone();
                                 let oneshot_table_scan = oneshot_table_scan.clone();
                                 let mut req_ctx = req_ctx.clone();
