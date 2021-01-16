@@ -33,7 +33,6 @@ mod tracker;
 pub use self::endpoint::Endpoint;
 pub use self::error::{Error, Result};
 pub use checksum::checksum_crc64_xor;
-use tidb_query_executors::interface::BatchExecuteResult;
 
 use crate::storage::mvcc::TimeStamp;
 use crate::storage::Statistics;
@@ -61,7 +60,7 @@ pub trait RequestHandler: Send {
         panic!("unary request is not supported for this handler");
     }
 
-    async fn handle_request_batch_result(&mut self) -> Result<Vec<BatchExecuteResult>> {
+    async fn handle_request_batch_result(&mut self) -> Result<Vec<Vec<u8>>> {
         panic!("handle_request_batch_result is not supported for this handler");
     }
 

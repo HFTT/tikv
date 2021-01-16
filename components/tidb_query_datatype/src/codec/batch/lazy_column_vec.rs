@@ -8,6 +8,7 @@ use crate::codec::Result;
 use crate::expr::EvalContext;
 
 use std::ops::{Index, IndexMut, Range, RangeFrom, RangeTo};
+use crate::codec::table;
 
 /// Stores multiple `LazyBatchColumn`s. Each column has an equal length.
 #[derive(Clone, Debug)]
@@ -137,6 +138,37 @@ impl LazyBatchColumnVec {
             }
         }
         Ok(())
+    }
+
+    /// Encode rows
+    pub fn encode_rows(
+        &self,
+        logical_rows: &[usize],
+        output_offsets: &[u32],
+        schema: &[FieldType],
+        ctx: &mut EvalContext,
+        need_common_handle: bool,
+        table_id: i64,
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut rows = Vec::with_capacity(logical_rows.len());
+        for idx in logical_rows {
+            let mut output = vec![];
+            if need_common_handle {
+                output.reserve(self.maximum_encoded_size(&[*idx], output_offsets));
+            }
+            for offset in output_offsets {
+                let offset = *offset as usize;
+                let col = &self.columns[offset];
+                if need_common_handle {
+                    col.encode(*idx, &schema[offset], ctx, &mut output)?;
+                    output = table::encode_common_handle_for_test(table_id, &output);
+                } else {
+                    output = table::encode_row_key(table_id, col.decoded().to_int_vec()[*idx].unwrap())
+                }
+            }
+            rows.push(output);
+        }
+        Ok(rows)
     }
 
     /// Encode into chunk format.

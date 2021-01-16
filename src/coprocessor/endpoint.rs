@@ -1,7 +1,6 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::future::Future;
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::{borrow::Cow, time::Duration};
 
@@ -424,7 +423,7 @@ impl Endpoint {
     ) -> Result<
         std::result::Result<
             coppb::Response,
-            std::result::Result<Vec<BatchExecuteResult>, SelectResponse>,
+            std::result::Result<Vec<Vec<u8>>, SelectResponse>,
         >,
     > {
         // When this function is being executed, it may be queued for a long time, so that
@@ -504,7 +503,7 @@ impl Endpoint {
         Output = Result<
             std::result::Result<
                 coppb::Response,
-                std::result::Result<Vec<BatchExecuteResult>, SelectResponse>,
+                std::result::Result<Vec<Vec<u8>>, SelectResponse>,
             >,
         >,
     > {
@@ -577,11 +576,10 @@ impl Endpoint {
                         resp
                     }
                     Ok(Err(Ok(resp))) => {
-                        let resp: Vec<BatchExecuteResult> = resp;
                         assert!(oneshot_table_scan_ctx.is_some());
                         let (oneshot_table_scan, req_ctx) = oneshot_table_scan_ctx.unwrap();
                         // decode handle to keys
-                        let mut keys: Vec<Vec<u8>> = todo!();
+                        let mut keys: Vec<Vec<u8>> = resp;
                         keys.sort();
 
                         // get available regions
@@ -595,14 +593,14 @@ impl Endpoint {
                             .unwrap();
                         let mut range_map = std::collections::BTreeMap::new();
                         for (idx, region) in regions.iter().enumerate() {
-                            range_map.insert(region.start_key, idx);
+                            range_map.insert(region.start_key.clone(), idx);
                         }
 
                         // group keys by leader regions
                         let mut keys_group_by_region = std::collections::HashMap::new();
                         for key in keys {
-                            if let Some((_, idx)) = range_map.range(..=key).next_back() {
-                                let region = regions[*idx];
+                            if let Some((_, idx)) = range_map.range(..=key.clone()).next_back() {
+                                let region = &regions[*idx];
                                 if region.end_key <= key {
                                     // key isn't in any region
                                     todo!()
@@ -628,7 +626,7 @@ impl Endpoint {
                             Result<Vec<(RequestHandlerBuilder<E::Snap>, ReqContext)>>
                          = keys_group_by_region
                             .into_iter()
-                            .map(|(region_idx, ranges)| -> Result<(RequestHandlerBuilder<E::Snap>, ReqContext)> {
+                            .map(|(_region_idx, ranges)| -> Result<(RequestHandlerBuilder<E::Snap>, ReqContext)> {
                                 let req = req.clone();
                                 let oneshot_table_scan = oneshot_table_scan.clone();
                                 let mut req_ctx = req_ctx.clone();
@@ -697,7 +695,7 @@ impl Endpoint {
                                 Ok(Err(err)) | Err(err) => return make_error_response(err),
                             };
 
-                            let resp: SelectResponse = resp.unwrap_err().unwrap_err();
+                            let mut resp: SelectResponse = resp.unwrap_err().unwrap_err();
 
                             if let Some(result) = &mut result {
                                 for row in resp.take_rows().into_iter() {
