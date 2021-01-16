@@ -534,6 +534,43 @@ impl Endpoint {
                     }
                     Ok(Err(resp)) => {
                         assert!(oneshot_table_scan.is_some());
+
+                        // decode handle to keys
+                        let mut keys: Vec<Vec<u8>> = todo!();
+
+                        let regions = self
+                            .region_info
+                            .get_regions_in_range(
+                                keys.iter().map(|k| k.as_ref()).min().unwrap(),
+                                keys.iter().map(|k| k.as_ref()).max().unwrap(),
+                            )
+                            .unwrap();
+                        let mut range_map = std::collections::BTreeMap::new();
+                        for (idx, region) in regions.iter().enumerate() {
+                            range_map.insert(region.start_key, idx);
+                        }
+
+                        let mut keys_group_by_region = std::collections::HashMap::new();
+                        for key in keys {
+                            if let Some((_, idx)) = range_map.range(..=key).next_back() {
+                                let region = regions[*idx];
+                                if region.end_key <= key {
+                                    // key isn't in any region
+                                    todo!()
+                                }
+                                let entry = keys_group_by_region.entry(idx).or_insert(Vec::new());
+                                (*entry).push(coppb::KeyRange {
+                                    start: key.clone(),
+                                    end: key,
+                                    ..coppb::KeyRange::new()
+                                });
+                            } else {
+                                // Key before the first region
+                                todo!()
+                            }
+                        }
+
+                        // run tbl executor
                         todo!()
                     }
                     Err(err) => make_error_response(err),

@@ -1,9 +1,9 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use protobuf::Message;
-use std::{convert::TryFrom, unimplemented};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::{convert::TryFrom, unimplemented};
 
 use fail::fail_point;
 use kvproto::coprocessor::KeyRange;
@@ -127,7 +127,7 @@ impl BatchExecutorsRunner<()> {
                 ExecType::TypeExchangeReceiver => {
                     other_err!("ExchangeReceiver executor not implemented");
                 }
-                _ => unimplemented!()
+                _ => unimplemented!(),
             }
         }
 
