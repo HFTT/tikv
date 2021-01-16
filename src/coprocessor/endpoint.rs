@@ -504,7 +504,7 @@ impl Endpoint {
     #[inline]
     #[trace("Endpoint::parse_and_handle_unary_request")]
     pub fn parse_and_handle_unary_request<E: Engine>(
-        &self,
+        self: Arc<Self>,
         req: coppb::Request,
         peer: Option<String>,
     ) -> impl Future<Output = coppb::Response> {

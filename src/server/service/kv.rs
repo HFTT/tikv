@@ -305,7 +305,7 @@ impl<T: RaftStoreRouter<RocksEngine> + 'static, E: Engine, L: LockManager> Tikv
             CoprocessorResponse
         );
         let _g = scope.enter();
-        let future = future_cop(&self.cop, &self.storage, Some(ctx.peer()), req);
+        let future = future_cop(self.cop.clone(), &self.storage, Some(ctx.peer()), req);
         let task = async move {
             let mut resp = future.await?;
             drop(scope);
@@ -872,7 +872,7 @@ impl<T: RaftStoreRouter<RocksEngine> + 'static, E: Engine, L: LockManager> Tikv
                 handle_batch_commands_request(
                     &mut batcher,
                     &storage,
-                    &cop,
+                    cop.clone(),
                     &trace_reporter,
                     &peer,
                     id,
@@ -1066,7 +1066,7 @@ fn response_batch_commands_request<F>(
 fn handle_batch_commands_request<E: Engine, L: LockManager>(
     batcher: &mut Option<ReqBatcher>,
     storage: &Storage<E, L>,
-    cop: &Endpoint,
+    cop: Arc<Endpoint>,
     trace_reporter: &Arc<TraceReporter>,
     peer: &str,
     id: u64,
@@ -1640,7 +1640,7 @@ fn future_ver_delete_range<E: Engine, L: LockManager>(
 }
 
 fn future_cop<E: Engine, L: LockManager>(
-    cop: &Endpoint,
+    cop: Arc<Endpoint>,
     _storage: &Storage<E, L>,
     peer: Option<String>,
     req: Request,
