@@ -577,32 +577,53 @@ impl Endpoint {
                         }
 
                         // get available regions
-                        // TODO: filter foller region
-                        let regions = self
-                            .region_info
-                            .get_regions_in_range(
-                                // keys.iter().map(|k| k.as_ref()).min().unwrap(),
-                                // keys.iter().map(|k| k.as_ref()).max().unwrap(),
-                                &[],
-                                &[0xff],
-                            )
-                            .unwrap();
-                        let mut range_map = std::collections::BTreeMap::new();
-                        for (idx, region) in regions.iter().enumerate() {
-                            range_map.insert(region.start_key.clone(), idx);
-                        }
+                        let mut regions = self.region_info.get_all_regions().unwrap();
 
-                        // group keys by leader regions
-                        let mut keys_group_by_region = std::collections::HashMap::new();
-                        for key in keys {
-                            if let Some((_, idx)) = range_map.range(..=key.clone()).next_back() {
-                                let region = &regions[*idx];
-                                if region.end_key <= key {
-                                    // key isn't in any region
-                                    todo!()
-                                }
-                                let entry = keys_group_by_region.entry(idx).or_insert(Vec::new());
-                                (*entry).push(coppb::KeyRange {
+                        regions.sort_by(|x, y| {
+                            ((&x.region.start_key, &x.region.get_region_epoch().version))
+                                .cmp(&(&y.region.start_key, &y.region.get_region_epoch().version))
+                        });
+
+                        let mut rs = Vec::with_capacity(regions.len());
+                        let mut region_iter = regions.into_iter();
+                        let mut prev = region_iter.next().unwrap();
+                        while prev.role != raft::StateRole::Leader {
+                            prev = region_iter.next().unwrap();
+                        }
+                        for region in region_iter {
+                            if region.role != raft::StateRole::Leader {
+                                continue;
+                            }
+                            if &prev.region.start_key == &region.region.start_key {
+                                prev = region;
+                            } else {
+                                rs.push(std::mem::replace(&mut prev, region).region);
+                            }
+                        }
+                        rs.push(prev.region);
+
+                        let mut region_iter = rs.into_iter();
+                        let mut key_iter = keys.into_iter();
+
+                        let mut group_ranges = vec![];
+                        let mut cur_region = region_iter.next().unwrap();
+                        let mut cur_key = key_iter.next().unwrap();
+                        let mut ranges = vec![];
+                        while !key_iter.is_empty() && !region_iter.is_empty() {
+                            if &cur_key < &cur_region.start_key {
+                                // FIXME: region not found
+                                cur_key = key_iter.next().unwrap();
+                                continue;
+                            }
+                            if &cur_key >= &cur_region.end_key {
+                                cur_region = region_iter.next().unwrap();
+                                continue;
+                            }
+
+                            if &cur_key >= &cur_region.start_key && &cur_key < &cur_region.end_key {
+                                let key = std::mem::replace(&mut cur_key, key_iter.next().unwrap());
+
+                                ranges.push(coppb::KeyRange {
                                     start: key.clone(),
                                     end: {
                                         let mut key = key;
@@ -612,52 +633,139 @@ impl Endpoint {
                                     ..coppb::KeyRange::default()
                                 });
                             } else {
-                                // Key before the first region
-                                todo!()
+                                if !ranges.is_empty() {
+                                    group_ranges.push(std::mem::replace(&mut ranges, vec![]));
+                                }
+                                cur_region = region_iter.next().unwrap();
                             }
                         }
 
-                        // construct tbl executor builder
-                        let builders_and_req_ctxs:
-                            Result<Vec<(RequestHandlerBuilder<E::Snap>, ReqContext)>>
-                         = keys_group_by_region
-                            .into_iter()
-                            .map(|(_region_idx, ranges)| -> Result<(RequestHandlerBuilder<E::Snap>, ReqContext)> {
-                                let req = req.clone();
-                                let oneshot_table_scan = oneshot_table_scan.clone();
-                                let mut req_ctx = req_ctx.clone();
-                                req_ctx.is_desc_scan = Some(oneshot_table_scan.get_executors().iter().next().unwrap().get_tbl_scan().get_desc());
-                                req_ctx.tag = ReqTag::select;
-                                req_ctx.ranges = ranges.into();
+                        if key_iter.is_empty() {
+                            loop {
+                                if &cur_key < &cur_region.start_key {
+                                    // FIXME: region not found
+                                    break;
+                                }
 
-                                self.check_memory_locks(&req_ctx)?;
+                                if &cur_key >= &cur_region.start_key
+                                    && &cur_key < &cur_region.end_key
+                                {
+                                    ranges.push(coppb::KeyRange {
+                                        start: cur_key.clone(),
+                                        end: {
+                                            let mut key = cur_key;
+                                            key.push(0);
+                                            key
+                                        },
+                                        ..coppb::KeyRange::default()
+                                    });
+                                    break;
+                                }
 
-                                let batch_row_limit = self.get_batch_row_limit(false);
-                                let builder: RequestHandlerBuilder<E::Snap> = Box::new(move |snap: E::Snap, req_ctx: &ReqContext| {
-                                    let data_version = snap.get_data_version();
-                                    let store = SnapshotStore::new(
-                                        snap,
-                                        req.start_ts.into(),
-                                        req_ctx.context.get_isolation_level(),
-                                        !req_ctx.context.get_not_fill_cache(),
-                                        req_ctx.bypass_locks.clone(),
-                                        req.get_is_cache_enabled(),
-                                    );
-                                    dag::DagHandlerBuilder::new(
-                                        oneshot_table_scan,
-                                        req_ctx.ranges.clone(),
-                                        store,
-                                        req_ctx.deadline,
-                                        batch_row_limit,
-                                        false,
-                                        req.get_is_cache_enabled(),
-                                    )
-                                    .data_version(data_version)
-                                    .build()
+                                if let Some(region) = region_iter.next() {
+                                    cur_region = region;
+                                } else {
+                                    break;
+                                }
+                            }
+                        } else if region_iter.is_empty() {
+                            if !ranges.is_empty() {
+                                group_ranges.push(std::mem::replace(&mut ranges, vec![]));
+                            }
+
+                            while let Some(key) = key_iter.next() {
+                                if &cur_key >= &cur_region.start_key
+                                    && &cur_key < &cur_region.end_key
+                                {
+                                    let key = std::mem::replace(&mut cur_key, key);
+                                    ranges.push(coppb::KeyRange {
+                                        start: key.clone(),
+                                        end: {
+                                            let mut key = key;
+                                            key.push(0);
+                                            key
+                                        },
+                                        ..coppb::KeyRange::default()
+                                    });
+                                } else if &cur_key < &cur_region.start_key {
+                                    // FIXME: region not found
+                                    cur_key = key;
+                                } else {
+                                    break;
+                                }
+                            }
+
+                            if &cur_key >= &cur_region.start_key && &cur_key < &cur_region.end_key {
+                                ranges.push(coppb::KeyRange {
+                                    start: cur_key.clone(),
+                                    end: {
+                                        let mut key = cur_key;
+                                        key.push(0);
+                                        key
+                                    },
+                                    ..coppb::KeyRange::default()
                                 });
+                            } else {
+                                // FIXME: region not found
+                            }
+                        }
 
-                                Ok((builder, req_ctx))
-                            })
+                        if !ranges.is_empty() {
+                            group_ranges.push(ranges);
+                        }
+
+                        // construct tbl executor builder
+                        let builders_and_req_ctxs: Result<
+                            Vec<(RequestHandlerBuilder<E::Snap>, ReqContext)>,
+                        > = group_ranges
+                            .into_iter()
+                            .map(
+                                |ranges| -> Result<(RequestHandlerBuilder<E::Snap>, ReqContext)> {
+                                    let req = req.clone();
+                                    let oneshot_table_scan = oneshot_table_scan.clone();
+                                    let mut req_ctx = req_ctx.clone();
+                                    req_ctx.is_desc_scan = Some(
+                                        oneshot_table_scan
+                                            .get_executors()
+                                            .iter()
+                                            .next()
+                                            .unwrap()
+                                            .get_tbl_scan()
+                                            .get_desc(),
+                                    );
+                                    req_ctx.tag = ReqTag::select;
+                                    req_ctx.ranges = ranges.into();
+
+                                    self.check_memory_locks(&req_ctx)?;
+
+                                    let batch_row_limit = self.get_batch_row_limit(false);
+                                    let builder: RequestHandlerBuilder<E::Snap> =
+                                        Box::new(move |snap: E::Snap, req_ctx: &ReqContext| {
+                                            let data_version = snap.get_data_version();
+                                            let store = SnapshotStore::new(
+                                                snap,
+                                                req.start_ts.into(),
+                                                req_ctx.context.get_isolation_level(),
+                                                !req_ctx.context.get_not_fill_cache(),
+                                                req_ctx.bypass_locks.clone(),
+                                                req.get_is_cache_enabled(),
+                                            );
+                                            dag::DagHandlerBuilder::new(
+                                                oneshot_table_scan,
+                                                req_ctx.ranges.clone(),
+                                                store,
+                                                req_ctx.deadline,
+                                                batch_row_limit,
+                                                false,
+                                                req.get_is_cache_enabled(),
+                                            )
+                                            .data_version(data_version)
+                                            .build()
+                                        });
+
+                                    Ok((builder, req_ctx))
+                                },
+                            )
                             .collect();
 
                         let builders_and_req_ctxs = match builders_and_req_ctxs {
@@ -669,7 +777,7 @@ impl Endpoint {
                         let spawn_handles: Vec<_> = builders_and_req_ctxs
                             .into_iter()
                             .map(|(builder, req_ctx)| {
-                                    self.handle_unary_request::<E>(req_ctx, builder, false, true)
+                                self.handle_unary_request::<E>(req_ctx, builder, false, true)
                             })
                             .collect();
 
@@ -699,7 +807,9 @@ impl Endpoint {
                                 for warning in resp.take_warnings().into_iter() {
                                     result.mut_warnings().push(warning);
                                 }
-                                for execution_summarie in resp.take_execution_summaries().into_iter() {
+                                for execution_summarie in
+                                    resp.take_execution_summaries().into_iter()
+                                {
                                     result.mut_execution_summaries().push(execution_summarie);
                                 }
                                 result.set_warning_count(
@@ -719,7 +829,10 @@ impl Endpoint {
                     Err(err) => make_error_response(err),
                 },
             }
-        }.with_scope(Scope::from_local_parent("Endpoint::parse_and_handle_unary_request"))
+        }
+        .with_scope(Scope::from_local_parent(
+            "Endpoint::parse_and_handle_unary_request",
+        ))
     }
 
     /// The real implementation of handling a stream request.

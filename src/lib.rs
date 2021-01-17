@@ -29,6 +29,7 @@
 #![feature(clamp)]
 #![feature(negative_impls)]
 #![feature(concat_idents)]
+#![feature(exact_size_is_empty)]
 
 #[macro_use(fail_point)]
 extern crate fail;

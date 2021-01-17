@@ -88,6 +88,9 @@ pub enum RegionInfoQuery {
         end_key: Vec<u8>,
         callback: Callback<Vec<Region>>,
     },
+    GetAllRegions {
+        callback: Callback<Vec<RegionInfo>>,
+    },
     /// Gets all contents from the collection. Only used for testing.
     DebugDump(mpsc::Sender<(RegionsMap, RegionRangesMap)>),
 }
@@ -111,6 +114,7 @@ impl Display for RegionInfoQuery {
                 &log_wrappers::Value::key(end_key)
             ),
             RegionInfoQuery::DebugDump(_) => write!(f, "DebugDump"),
+            RegionInfoQuery::GetAllRegions { .. } => write!(f, "GetAllRegions"),
         }
     }
 }
@@ -373,6 +377,10 @@ impl RegionCollector {
         callback(self.regions.get(&region_id).cloned());
     }
 
+    pub fn handle_get_all_regions(&self, callback: Callback<Vec<RegionInfo>>) {
+        callback(self.regions.values().cloned().collect())
+    }
+
     pub fn handle_get_regions_in_range(
         &self,
         start_key: Vec<u8>,
@@ -459,6 +467,7 @@ impl Runnable for RegionCollector {
                 tx.send((self.regions.clone(), self.region_ranges.clone()))
                     .unwrap();
             }
+            RegionInfoQuery::GetAllRegions { callback } => self.handle_get_all_regions(callback),
         }
     }
 }
@@ -537,6 +546,10 @@ pub trait RegionInfoProvider: Send + Clone + 'static {
     fn get_regions_in_range(&self, _start_key: &[u8], _end_key: &[u8]) -> Result<Vec<Region>> {
         unimplemented!()
     }
+
+    fn get_all_regions(&self) -> Result<Vec<RegionInfo>> {
+        unimplemented!()
+    }
 }
 
 impl RegionInfoProvider for RegionInfoAccessor {
@@ -562,6 +575,28 @@ impl RegionInfoProvider for RegionInfoAccessor {
         self.scheduler
             .schedule(msg)
             .map_err(|e| box_err!("failed to send request to region collector: {:?}", e))
+    }
+
+    fn get_all_regions(&self) -> Result<Vec<RegionInfo>> {
+        let (tx, rx) = mpsc::channel();
+        let msg = RegionInfoQuery::GetAllRegions {
+            callback: Box::new(move |regions| {
+                if let Err(e) = tx.send(regions) {
+                    warn!("failed to send get_all_regions result: {:?}", e);
+                }
+            }),
+        };
+        self.scheduler
+            .schedule(msg)
+            .map_err(|e| box_err!("failed to send request to region collector: {:?}", e))
+            .and_then(|_| {
+                rx.recv().map_err(|e| {
+                    box_err!(
+                        "failed to receive get_all_regions result from region collector: {:?}",
+                        e
+                    )
+                })
+            })
     }
 
     fn get_regions_in_range(&self, start_key: &[u8], end_key: &[u8]) -> Result<Vec<Region>> {
